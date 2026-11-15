@@ -1,0 +1,1358 @@
+//! The main window: project tabs across the top, the selected
+//! project's sessions on the left, the active terminal with its pasted-image strip, the image
+//! viewer and the status bar.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use egui::{Align, Color32, Key, KeyboardShortcut, Layout, Modifiers, RichText, Sense, Stroke, Ui, Vec2};
+use serde::{Deserialize, Serialize};
+
+use crate::images::{self, ImageCache, Slot};
+use crate::agents::{self, Kind, LaunchOpts};
+use crate::session::{Profile, Session};
+use crate::term_theme;
+use crate::theme::*;
+use crate::view::{self, Action, ViewOptions, ViewState};
+use crate::widgets::{self, Icon};
+use crate::winsys;
+use crate::{keys, mcp, plugins};
+
+mod plugins_ui;
+mod snippets;
+mod options;
+mod mcp_api;
+mod launch;
+mod mcp_servers_ui;
+mod sidebar;
+mod topbar;
+mod pages;
+mod status_bar;
+mod viewer;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Project {
+    pub path: PathBuf,
+    pub name: String,
+    pub collapsed: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedSession {
+    pub project: PathBuf,
+    pub profile: Profile,
+    pub name: String,
+    /// Unix seconds when the session was first created (for the Today / Yesterday groups).
+    #[serde(default)]
+    pub created: u64,
+    /// The title the program last set (shown while the session isn't running).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Claude / Codex conversation id, so the session resumes it.
+    #[serde(default, alias = "claude_id")]
+    pub agent_id: Option<String>,
+    /// Launch settings (unrestricted, model, effort, CLI parameters).
+    #[serde(default)]
+    pub opts: LaunchOpts,
+    /// Estimated cost so far (shown while the session isn't running).
+    #[serde(default)]
+    pub cost: Option<f64>,
+    /// Pinned to the top (order among pinned); 0 = not pinned.
+    #[serde(default)]
+    pub pin: u32,
+}
+
+/// A session from a previous run that isn't running: listed in the sidebar, started (resumed)
+/// when clicked.
+#[derive(Clone)]
+struct Dormant {
+    id: u64,
+    saved: SavedSession,
+}
+
+impl Dormant {
+    fn display_name(&self) -> String {
+        if !self.saved.name.is_empty() {
+            return self.saved.name.clone();
+        }
+        match self.saved.title.as_deref().map(str::trim) {
+            Some(t) if !t.is_empty() => crate::session::pretty_title(t, &self.saved.profile.name),
+            _ => self.saved.profile.name.clone(),
+        }
+    }
+}
+
+/// One row of the sessions list (running or not).
+struct Row {
+    id: u64,
+    live: bool,
+    name: String,
+    profile: Profile,
+    created: u64,
+    exited: Option<i32>,
+    unseen: bool,
+    images: usize,
+    resumable: bool,
+    unrestricted: bool,
+    attention: bool,
+    /// Claude is working (hooks).
+    busy: bool,
+    /// Why it needs you (Claude's message), when it does.
+    attention_msg: Option<String>,
+    cost: Option<f64>,
+    /// Share of the 5-hour plan limit, in percentage points.
+    plan: Option<f64>,
+    pin: u32,
+}
+
+/// Percentage points of a plan limit: "0%", "<1%", "7%" (over 100% = more than one window).
+fn fmt_plan(p: f64) -> String {
+    if p <= 0.0 {
+        "0%".into()
+    } else if p < 1.0 {
+        "<1%".into()
+    } else {
+        format!("{p:.0}%")
+    }
+}
+
+/// "New … session (with settings)" / "Restart with settings…" dialog.
+struct LaunchDialog {
+    project: PathBuf,
+    profile: Profile,
+    name: String,
+    opts: LaunchOpts,
+    /// Restart (or resume) this session instead of creating one.
+    restart: Option<u64>,
+}
+
+/// A row in the New-session menu: icon + label.
+fn menu_item(ui: &mut Ui, (icon, col): (Icon, Color32), label: &str) -> bool {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(300.0), 30.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(r, 4.0, CARD_HI);
+    }
+    widgets::paint_icon(ui.painter(), icon, egui::pos2(r.left() + 16.0, r.center().y), 15.0, col);
+    ui.painter().text(egui::pos2(r.left() + 36.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), if resp.hovered() { Color32::WHITE } else { TEXT });
+    resp.clicked()
+}
+
+/// Claude's orange asterisk, Codex's knot, a prompt for shells.
+fn agent_icon(p: &Profile) -> (Icon, Color32) {
+    match p.kind {
+        Kind::Claude => (Icon::Sparkle, Color32::from_rgb(217, 119, 87)),
+        Kind::Codex => (Icon::Codex, Color32::from_rgb(200, 204, 212)),
+        Kind::Shell => (Icon::Prompt, Color32::from_rgb(78, 201, 176)),
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub projects: Vec<Project>,
+    pub sessions: Vec<SavedSession>,
+    pub reopen_sessions: bool,
+    pub selected_project: Option<PathBuf>,
+    pub default_profile: String,
+    pub font_size: f32,
+    pub ui_size: f32,
+    pub code_font: String,
+    pub inline_previews: bool,
+    pub preview_rows: usize,
+    /// Inline previews: longest side in points, and whether they may cover text.
+    pub preview_max_px: f32,
+    pub preview_over_text: bool,
+    pub shift_enter_alt: bool,
+    pub show_image_strip: bool,
+    pub term_theme: term_theme::TermTheme,
+    pub last_claude_opts: LaunchOpts,
+    pub last_codex_opts: LaunchOpts,
+    pub cli_history: Vec<String>,
+    /// Render {red}…{/} colour tags in the terminal.
+    pub color_tags: bool,
+    /// Tell Claude about the tags (`--append-system-prompt`) in sessions started here.
+    pub color_tag_prompt: bool,
+    // Options > General.
+    pub launch_on_startup: bool,
+    pub minimize_to_tray: bool,
+    pub notifications: bool,
+    pub notify_sound: bool,
+    pub flash_taskbar: bool,
+    pub badge_count: bool,
+    pub badge_color: [u8; 3],
+    pub badge_text_color: [u8; 3],
+    pub debug_logging: bool,
+    pub idle_close_minutes: u32,
+    pub memory_threshold_gb: f32,
+    /// Shortcut overrides: command id → "Ctrl+Shift+N" ("" = unbound). See keys.rs.
+    pub keybindings: std::collections::HashMap<String, String>,
+    /// Ctrl+click on a file path opens it with: auto / vscode / rider / default / custom.
+    pub editor: String,
+    /// For "custom": a command using {file}, {line}, {col}.
+    pub editor_custom: String,
+    pub snippets: Vec<Snippet>,
+    /// Show estimated session cost in the list and header.
+    pub show_cost: bool,
+    /// What the session usage shows: "plan" (share of the subscription's 5-hour / weekly
+    /// limits) or "cost" (estimated API price).
+    pub usage_as: String,
+    /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
+    /// files, so it reads as 0 there (not the struct default).
+    #[serde(default)]
+    pub version: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            projects: Vec::new(),
+            sessions: Vec::new(),
+            reopen_sessions: true,
+            selected_project: None,
+            default_profile: crate::session::CLAUDE.into(),
+            font_size: 15.0,
+            ui_size: 14.0,
+            code_font: crate::fonts::DEFAULT_LIST.into(),
+            inline_previews: true,
+            preview_rows: 8,
+            preview_max_px: 320.0,
+            preview_over_text: false,
+            shift_enter_alt: true,
+            show_image_strip: true,
+            term_theme: Default::default(),
+            last_claude_opts: Default::default(),
+            last_codex_opts: Default::default(),
+            cli_history: Vec::new(),
+            color_tags: true,
+            color_tag_prompt: true,
+            launch_on_startup: false,
+            minimize_to_tray: false,
+            notifications: true,
+            notify_sound: true,
+            flash_taskbar: false,
+            badge_count: false,
+            badge_color: [0xe5, 0x14, 0x14],
+            badge_text_color: [0xff, 0xff, 0xff],
+            debug_logging: false,
+            idle_close_minutes: 0,
+            memory_threshold_gb: 0.0,
+            keybindings: Default::default(),
+            editor: "auto".into(),
+            editor_custom: String::new(),
+            show_cost: true,
+            usage_as: "plan".into(),
+            snippets: vec![
+                Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
+                Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
+                Snippet { name: "Explain this error".into(), text: "Explain this error and suggest the smallest fix:\n".into(), send: false },
+            ],
+            version: 8,
+        }
+    }
+}
+
+struct Tab {
+    project: PathBuf,
+    created: u64,
+    /// Pinned to the top of the list (order among pinned, 1-based); 0 = not pinned.
+    pin: u32,
+    /// The terminal rang the bell since the last frame.
+    bell: bool,
+    sess: Session,
+    view: ViewState,
+}
+
+/// A saved prompt / command (Options > Snippets).
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Snippet {
+    pub name: String,
+    pub text: String,
+    /// Press Enter after inserting.
+    pub send: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptPage {
+    General,
+    Terminal,
+    Images,
+    Snippets,
+    Shortcuts,
+    About,
+}
+
+/// Fixed (not reassignable) keys and mouse actions, listed under Options > Shortcuts.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+V / Shift+Insert / right-click", "Paste (files → paths, image → saved PNG path, else text)"),
+    ("Drag files onto the window", "Paste their paths"),
+    ("Ctrl+C", "Copy the selection, else send Ctrl+C"),
+    ("Shift+Enter", "Newline in Claude Code"),
+    ("Ctrl+1 … Ctrl+9", "Project tab 1 … 9"),
+    ("Ctrl + mouse wheel", "Terminal font size"),
+    ("Shift+PgUp / PgDn / Home / End", "Scroll back"),
+    ("Double / triple click", "Select word / line"),
+    ("Click an image or its path", "Open the image viewer"),
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum PluginFilter {
+    #[default]
+    All,
+    Bundles,
+    Plugins,
+    Installed,
+}
+
+/// State of the Claude Code plugins window.
+#[derive(Default)]
+struct PluginsUi {
+    catalogue: Vec<plugins::Plugin>,
+    installed: std::collections::HashMap<String, Vec<plugins::Installed>>,
+    filter: PluginFilter,
+    search: String,
+    selected: Option<String>,
+    /// Install scope: user / project / local.
+    scope: String,
+    show_log: bool,
+    refreshing: bool,
+    job: plugins::JobRef,
+    /// Sources (marketplaces) and the source filter (None = all sources).
+    markets: Vec<plugins::Market>,
+    market_filter: Option<String>,
+    show_sources: bool,
+    new_source: String,
+    /// A source whose Remove was clicked once (the second click confirms).
+    confirm_remove: Option<String>,
+}
+
+/// BUNDLE badges in the plugins window (the app's blue, a shade deeper than buttons).
+const BADGE_BLUE: Color32 = Color32::from_rgb(28, 92, 160);
+
+/// Background of the plugins output log.
+const TERM_LOG_BG: Color32 = Color32::from_rgb(20, 21, 24);
+
+/// A session message (or "done" notice) waiting to be typed into its target session.
+struct Pending {
+    id: String,
+    from_key: String,
+    to: u64,
+    /// Held until this session (hook key) finishes its turn.
+    waiting_for: Option<String>,
+    text: String,
+    created: std::time::Instant,
+}
+
+struct Viewer {
+    path: PathBuf,
+    /// Images to step through with the arrow keys (the session's pastes).
+    list: Vec<PathBuf>,
+    zoom_fit: bool,
+}
+
+pub struct App {
+    s: Settings,
+    tabs: Vec<Tab>,
+    dormant: Vec<Dormant>,
+    active: Option<u64>,
+    next_id: u64,
+    profiles: Vec<Profile>,
+    cache: ImageCache,
+    viewer: Option<Viewer>,
+    renaming: Option<(u64, String)>,
+    /// The rename box takes the keyboard once, when it opens (asking every frame kept it from
+    /// ever losing focus, so Enter / clicking away never finished the rename).
+    rename_focus: bool,
+    renaming_project: Option<(PathBuf, String)>,
+    /// The session last shown in each project (restored when its tab is selected again).
+    remembered: std::collections::HashMap<PathBuf, u64>,
+    filter: String,
+    toast: Option<(String, Color32, f64)>,
+    logo: Option<egui::TextureHandle>,
+    focus_terminal: bool,
+    applied: (String, f32),
+    options: Option<OptPage>,
+    /// Options > Shortcuts is recording a new binding for this command.
+    capturing: Option<keys::Cmd>,
+    plugins: Option<PluginsUi>,
+    mcp_servers: Option<mcp_servers_ui::McpServersUi>,
+    /// The status bar's "clear" asks first: the session it's for.
+    confirm_clear: Option<u64>,
+    /// Plan usage limits (5-hour / weekly) from Claude's status line, and when they were read.
+    limits: Option<crate::hooks::Limits>,
+    limits_read: Option<(std::time::Instant, Option<std::time::SystemTime>)>,
+    /// Each conversation's share of the plan limits (conversation id → share), and its file time.
+    plan_usage: std::collections::HashMap<String, crate::hooks::PlanShare>,
+    plan_usage_read: Option<std::time::SystemTime>,
+    mcp: Option<mcp::Server>,
+    last_title: String,
+    drag_project: Option<PathBuf>,
+    drag_session: Option<u64>,
+    snippets_open: bool,
+    snippet_filter: String,
+    snippet_focus: bool,
+    outbox: Vec<Pending>,
+    next_msg: u64,
+    /// Sessions that get Enter shortly (after a pasted message landed).
+    enter_due: Vec<(u64, std::time::Instant)>,
+    /// Taskbar badge last drawn (Some(0) = mark, Some(n) = count, None = nothing yet).
+    last_badge: Option<Option<usize>>,
+    /// The session the last notification was about (clicking the toast opens it).
+    notified: Option<u64>,
+    last_manage: std::time::Instant,
+    /// Started with --minimized (launch at sign-in): hide into the tray on the first frame.
+    start_hidden: bool,
+    launch: Option<LaunchDialog>,
+    /// Models / efforts for the launch dialog, loaded in the background at start-up.
+    catalog: std::sync::Arc<std::sync::Mutex<Option<agents::Catalog>>>,
+    /// Hex fields being edited in Options (keyed by colour name).
+    hex_edit: std::collections::HashMap<String, String>,
+}
+
+fn project_name(p: &Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| p.display().to_string())
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext) -> Self {
+        let mut s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
+        install_fonts(&cc.egui_ctx, &s.code_font);
+        apply_style(&cc.egui_ctx, s.ui_size);
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        if s.editor.is_empty() {
+            s.editor = "auto".into();
+        }
+        if s.version < 8 {
+            s.notifications = true;
+            s.notify_sound = true;
+            s.badge_color = [0xe5, 0x14, 0x14];
+            s.badge_text_color = [0xff, 0xff, 0xff];
+        }
+        if s.version < 7 {
+            s.color_tags = true;
+            s.color_tag_prompt = true;
+        }
+        if s.version < 5 {
+            // The terminal font is a CSS-style family list now (the default list).
+            s.code_font = crate::fonts::DEFAULT_LIST.into();
+        }
+        if s.version < 4 {
+            // Profile names are now ("Claude", "Codex", "pwsh", "powershell", "cmd").
+            s.default_profile = crate::session::CLAUDE.into();
+            s.version = 4;
+        }
+        s.version = s.version.max(8);
+        // The registry is the truth for "launch on startup" (the user may have removed it).
+        s.launch_on_startup = winsys::autostart_enabled();
+        crate::dlog::ENABLED.store(s.debug_logging, std::sync::atomic::Ordering::Relaxed);
+        *agents::HOOK_SETTINGS.lock().unwrap() = crate::hooks::write_settings().map(|p| p.display().to_string());
+        crate::hooks::watch(cc.egui_ctx.clone());
+        if s.projects.is_empty() {
+            let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
+            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false });
+        }
+        std::thread::spawn(|| images::cleanup(Duration::from_secs(7 * 24 * 3600)));
+        let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
+            let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+            cc.egui_ctx.load_texture("app_logo", img, egui::TextureOptions::LINEAR)
+        });
+        agents::COLOR_TAG_PROMPT.store(s.color_tag_prompt && s.color_tags, std::sync::atomic::Ordering::Relaxed);
+        let applied = (s.code_font.clone(), s.ui_size);
+        let mut app = App {
+            s,
+            tabs: Vec::new(),
+            dormant: Vec::new(),
+            active: None,
+            next_id: 1,
+            profiles: Profile::detect(),
+            cache: ImageCache::new(),
+            viewer: None,
+            renaming: None,
+            rename_focus: false,
+            renaming_project: None,
+            remembered: Default::default(),
+            filter: String::new(),
+            toast: None,
+            logo,
+            focus_terminal: true,
+            applied,
+            options: None,
+            capturing: None,
+            plugins: None,
+            mcp_servers: None,
+            confirm_clear: None,
+            limits: None,
+            limits_read: None,
+            plan_usage: Default::default(),
+            plan_usage_read: None,
+            mcp: None,
+            last_title: String::new(),
+            drag_project: None,
+            drag_session: None,
+            snippets_open: false,
+            snippet_filter: String::new(),
+            snippet_focus: false,
+            outbox: Vec::new(),
+            next_msg: 0,
+            enter_due: Vec::new(),
+            last_badge: None,
+            notified: None,
+            last_manage: std::time::Instant::now(),
+            start_hidden: std::env::args().any(|a| a == "--minimized"),
+            launch: None,
+            catalog: Default::default(),
+            hex_edit: Default::default(),
+        };
+        let ctx = cc.egui_ctx.clone();
+        // MCP server for the sessions (tools to work with AI Terminal itself).
+        match mcp::start(std::sync::Arc::new(std::sync::Mutex::new(crate::mcp_tools::definitions())), ctx.clone()) {
+            Ok(srv) => {
+                // Sessions inherit these; Claude's MCP config reads them.
+                std::env::set_var(agents::MCP_URL_ENV, &srv.url);
+                std::env::set_var(agents::MCP_TOKEN_ENV, &srv.token);
+                *agents::MCP_URL.lock().unwrap() = Some(srv.url.clone());
+                *agents::MCP_CONFIG.lock().unwrap() = agents::write_mcp_config().map(|p| p.display().to_string());
+                crate::dlog!("mcp server at {}", srv.url);
+                app.mcp = Some(srv);
+            }
+            Err(e) => crate::dlog!("mcp server failed: {e}"),
+        }
+        {
+            let cat = app.catalog.clone();
+            let claude = app.profiles.iter().find(|p| p.kind == Kind::Claude).map(|p| p.program.clone()).filter(|p| p.to_lowercase().ends_with(".exe") && !p.to_lowercase().ends_with("cmd.exe"));
+            let codex = app.profiles.iter().find(|p| p.kind == Kind::Codex).map(|p| p.program.clone()).filter(|p| p.to_lowercase().ends_with(".exe") && !p.to_lowercase().ends_with("cmd.exe"));
+            std::thread::spawn(move || {
+                let c = agents::load_catalog(claude, codex);
+                *cat.lock().unwrap() = Some(c);
+            });
+        }
+        let selected = app.s.selected_project.clone();
+        // Nothing starts by itself: sessions from last time are listed and resume when clicked.
+        let saved = if app.s.reopen_sessions { std::mem::take(&mut app.s.sessions) } else { Vec::new() };
+        for mut ss in saved {
+            if app.s.projects.iter().any(|p| p.path == ss.project) {
+                if ss.created == 0 {
+                    ss.created = now_secs();
+                }
+                ss.profile.fix_kind();
+                if !ss.profile.is_agent() {
+                    // Shell sessions aren't kept between runs.
+                    continue;
+                }
+                // Pick up profile changes (e.g. Claude now started directly).
+                match app.profiles.iter().find(|p| p.kind == ss.profile.kind) {
+                    Some(p) => ss.profile = p.clone(),
+                    None => continue,
+                }
+                if let Some(id) = &ss.agent_id {
+                    let t = match ss.profile.kind {
+                        Kind::Claude => agents::claude_title(&ss.project, id),
+                        _ => agents::codex_title(id),
+                    };
+                    if t.is_some() {
+                        ss.title = t;
+                    }
+                }
+                let id = app.next_id;
+                app.next_id += 1;
+                app.dormant.push(Dormant { id, saved: ss });
+            }
+        }
+        let selected = selected.filter(|p| app.s.projects.iter().any(|x| &x.path == p)).or_else(|| app.s.projects.first().map(|p| p.path.clone()));
+        app.select_project(selected);
+        // Test hooks: `--add-project <dir>` adds a project tab; `--start <profile>` starts a session; `--paste-image <file>` registers a file as pasted into the active session
+        // (as if pasted with Ctrl+V); `--type <text>` types a line into it.
+        let args: Vec<String> = std::env::args().collect();
+        for w in args.windows(2) {
+            if w[0] == "--add-project" {
+                let dir = PathBuf::from(&w[1]);
+                if !app.s.projects.iter().any(|p| p.path == dir) {
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir, collapsed: false });
+                }
+            }
+        }
+        if args.iter().any(|a| a == "--launch-dialog") {
+            if let Some(p) = app.profiles.iter().find(|p| p.is_claude()).cloned() {
+                let pr = app.current_project();
+                app.open_launch_dialog(pr, p, None);
+            }
+        }
+        if args.iter().any(|a| a == "--options") {
+            app.options = Some(OptPage::Terminal);
+        }
+        for w in args.windows(2) {
+            if w[0] == "--options-page" {
+                app.options = Some(match w[1].as_str() {
+                    "general" => OptPage::General,
+                    "images" => OptPage::Images,
+                    "shortcuts" => OptPage::Shortcuts,
+                    "snippets" => OptPage::Snippets,
+                    "about" => OptPage::About,
+                    _ => OptPage::Terminal,
+                });
+            }
+        }
+        for w in args.windows(2) {
+            if w[0] == "--view-image" {
+                let p = PathBuf::from(&w[1]);
+                app.viewer = Some(Viewer { path: p.clone(), list: vec![p], zoom_fit: true });
+            }
+        }
+        for w in args.windows(2) {
+            if w[0] == "--pin" {
+                let p = app.current_project();
+                if let Some(r) = w[1].parse::<usize>().ok().and_then(|n| app.rows(&p).get(n.saturating_sub(1)).map(|r| r.id)) {
+                    app.set_pin(r, 1);
+                }
+            }
+        }
+        if args.iter().any(|a| a == "--no-previews") {
+            app.s.inline_previews = false;
+        }
+        if args.iter().any(|a| a == "--debug-log") {
+            app.s.debug_logging = true;
+            crate::dlog::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if args.iter().any(|a| a == "--plugins") {
+            app.open_plugins();
+        }
+        if args.iter().any(|a| a == "--plugins-sources") {
+            app.open_plugins();
+            if let Some(p) = app.plugins.as_mut() {
+                p.show_sources = true;
+            }
+        }
+        for w in args.windows(2) {
+            if w[0] == "--start" {
+                if let Some(p) = app.profiles.iter().find(|p| p.name == w[1]).cloned() {
+                    let pr = app.current_project();
+                    app.spawn(&ctx, pr, p, String::new());
+                }
+            }
+        }
+        for w in args.windows(2) {
+            if let Some(tab) = app.active_tab_mut() {
+                match w[0].as_str() {
+                    "--paste-image" => tab.sess.pasted_images.push(PathBuf::from(&w[1])),
+                    "--type" => tab.sess.write(format!("{}\r", w[1]).into_bytes()),
+                    "--find" => {
+                        tab.view.search.open();
+                        tab.view.search.query = w[1].clone();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        app
+    }
+
+    fn default_profile(&self) -> Profile {
+        self.profiles.iter().find(|p| p.name == self.s.default_profile).or(self.profiles.first()).cloned().unwrap()
+    }
+
+    /// A plain new session of `profile` (agents reuse the last model / effort / parameters).
+    fn new_default(&mut self, ctx: &egui::Context, project: PathBuf, profile: Profile, unrestricted: bool) {
+        let mut opts = if profile.is_agent() { self.last_opts(profile.kind).clone() } else { LaunchOpts::default() };
+        opts.unrestricted = unrestricted && profile.is_agent();
+        self.spawn_opts(ctx, project, profile, String::new(), opts);
+    }
+
+    /// The selected project tab, or the first project when Home is selected.
+    fn current_project(&self) -> PathBuf {
+        self.s.selected_project.clone().filter(|p| self.s.projects.iter().any(|x| &x.path == p)).unwrap_or_else(|| self.s.projects[0].path.clone())
+    }
+
+    /// Selects a project tab (None = Home) and shows the session last used there.
+    fn select_project(&mut self, p: Option<PathBuf>) {
+        self.active = p.as_ref().and_then(|p| {
+            let ids = self.project_sessions(p);
+            self.remembered.get(p).copied().filter(|id| ids.contains(id)).or(ids.first().copied())
+        });
+        self.s.selected_project = p;
+        self.filter.clear();
+        self.focus_terminal = true;
+    }
+
+    fn select_session(&mut self, id: u64) {
+        if let Some(t) = self.tabs.iter().find(|t| t.sess.id == id) {
+            self.remembered.insert(t.project.clone(), id);
+            self.s.selected_project = Some(t.project.clone());
+            self.active = Some(id);
+            self.focus_terminal = true;
+        }
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.iter().find(|t| Some(t.sess.id) == self.active)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        let a = self.active;
+        self.tabs.iter_mut().find(|t| Some(t.sess.id) == a)
+    }
+
+    fn spawn(&mut self, ctx: &egui::Context, project: PathBuf, profile: Profile, name: String) {
+        self.new_default(ctx, project, profile, false);
+        let _ = name;
+    }
+
+    fn spawn_opts(&mut self, ctx: &egui::Context, project: PathBuf, profile: Profile, name: String, opts: LaunchOpts) {
+        self.spawn_with(ctx, project, profile, name, None, opts, now_secs());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with(&mut self, ctx: &egui::Context, project: PathBuf, profile: Profile, name: String, resume: Option<String>, opts: LaunchOpts, created: u64) -> bool {
+        let id = self.next_id;
+        self.next_id += 1;
+        if !project.is_dir() {
+            self.toast(format!("Folder not found: {}", project.display()), RED, ctx);
+            return false;
+        }
+        match Session::spawn(id, name, profile.clone(), project.clone(), resume, opts, ctx) {
+            Ok(sess) => {
+                self.tabs.push(Tab { project, created, pin: 0, sess, view: ViewState::default(), bell: false });
+                self.select_session(id);
+                true
+            }
+            Err(e) => {
+                self.toast(format!("Couldn't start {}: {e}", profile.name), RED, ctx);
+                false
+            }
+        }
+    }
+
+    /// Starts a session from the last run (Claude Code resumes its conversation).
+    fn resume(&mut self, ctx: &egui::Context, id: u64) {
+        let Some(i) = self.dormant.iter().position(|d| d.id == id) else { return };
+        let d = self.dormant[i].clone();
+        let ss = d.saved;
+        let name = if ss.name.is_empty() { String::new() } else { ss.name.clone() };
+        if self.spawn_with(ctx, ss.project.clone(), ss.profile.clone(), name, ss.agent_id.clone(), ss.opts.clone(), ss.created) {
+            self.dormant.remove(i);
+            if let Some(t) = self.tabs.last_mut() {
+                t.pin = ss.pin;
+                // Keep the old title until the program sets a new one.
+                if t.sess.title.is_none() {
+                    t.sess.title = ss.title;
+                }
+            }
+        }
+    }
+
+    fn restart(&mut self, ctx: &egui::Context, id: u64) {
+        self.restart_with(ctx, id, None);
+    }
+
+    /// Restarts a session (resuming its conversation), optionally with new launch settings.
+    fn restart_with(&mut self, ctx: &egui::Context, id: u64, opts: Option<LaunchOpts>) {
+        let Some(i) = self.tabs.iter().position(|t| t.sess.id == id) else { return };
+        let opts = opts.unwrap_or_else(|| self.tabs[i].sess.opts.clone());
+        let pasted = self.tabs[i].sess.pasted_images.clone();
+        let tt = self.tabs[i].sess.transcript_title.clone();
+        let (project, profile, name, created) = (self.tabs[i].project.clone(), self.tabs[i].sess.profile.clone(), self.tabs[i].sess.name.clone(), self.tabs[i].created);
+        let pin = self.tabs[i].pin;
+        let new_id = self.next_id;
+        self.next_id += 1;
+        let resume = self.tabs[i].sess.agent_id.clone();
+        match Session::spawn(new_id, name, profile, project.clone(), resume, opts, ctx) {
+            Ok(mut sess) => {
+                sess.pasted_images = pasted;
+                sess.transcript_title = tt;
+                self.tabs[i] = Tab { project, created, pin, sess, view: ViewState::default(), bell: false };
+                self.select_session(new_id);
+            }
+            Err(e) => self.toast(format!("Couldn't restart: {e}"), RED, ctx),
+        }
+    }
+
+    fn close(&mut self, id: u64) {
+        let Some(i) = self.tabs.iter().position(|t| t.sess.id == id) else { return };
+        let project = self.tabs[i].project.clone();
+        let pos = self.project_sessions(&project).iter().position(|x| *x == id).unwrap_or(0);
+        self.tabs.remove(i);
+        if self.active == Some(id) {
+            // The neighbouring session of the same project (the project stays selected).
+            let same = self.project_sessions(&project);
+            self.remembered.remove(&project);
+            match same.get(pos.min(same.len().saturating_sub(1))) {
+                Some(&next) => self.select_session(next),
+                None => self.active = None,
+            }
+        }
+    }
+
+    fn toast(&mut self, msg: String, col: Color32, ctx: &egui::Context) {
+        self.toast = Some((msg, col, ctx.input(|i| i.time) + 4.0));
+    }
+
+    /// Ctrl+V: files copied in Explorer paste as their paths; a bitmap is saved as PNG and
+    /// pastes as its path (Claude Code attaches it); otherwise text (bracketed when multi-line).
+    fn paste(&mut self, ctx: &egui::Context) {
+        let mut cb = match arboard::Clipboard::new() {
+            Ok(c) => c,
+            Err(e) => return self.toast(format!("Clipboard unavailable: {e}"), RED, ctx),
+        };
+        let files = cb.get().file_list().unwrap_or_default();
+        let (text, images, kind): (String, Vec<PathBuf>, &str) = if !files.is_empty() {
+            let imgs = files.iter().filter(|p| images::is_image_path(p)).cloned().collect();
+            (files.iter().map(|p| images::quote(p)).collect::<Vec<_>>().join(" "), imgs, "files")
+        } else if let Ok(img) = cb.get_image() {
+            match images::save_clipboard_image(&img) {
+                Ok(p) => {
+                    self.cache.forget(&p);
+                    (images::quote(&p), vec![p], "image")
+                }
+                Err(e) => return self.toast(e, RED, ctx),
+            }
+        } else if let Ok(t) = cb.get_text() {
+            (t, Vec::new(), "text")
+        } else {
+            return;
+        };
+        let Some(tab) = self.active_tab_mut() else { return };
+        let bracketed = tab.sess.term.lock().mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
+        let n_images = images.len();
+        tab.sess.pasted_images.extend(images);
+        let data = if kind == "text" && (text.contains('\n') || text.contains('\r')) {
+            let t = text.replace("\r\n", "\n");
+            if bracketed {
+                format!("\x1b[200~{}\x1b[201~", t.replace('\x1b', ""))
+            } else {
+                t.replace('\n', "\r")
+            }
+        } else {
+            text
+        };
+        tab.sess.term.lock().scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+        tab.sess.write(data.into_bytes());
+        self.focus_terminal = true;
+        if n_images > 0 && kind == "image" {
+            self.toast("Image pasted — preview shown in the terminal".into(), GREEN, ctx);
+        }
+    }
+
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+        if dropped.is_empty() {
+            return;
+        }
+        let Some(tab) = self.active_tab_mut() else { return };
+        let text = dropped.iter().map(|p| images::quote(p)).collect::<Vec<_>>().join(" ") + " ";
+        tab.sess.pasted_images.extend(dropped.iter().filter(|p| images::is_image_path(p)).cloned());
+        tab.sess.write(text.into_bytes());
+        self.focus_terminal = true;
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        // Reassignable commands (Options > Shortcuts). Longer combinations first, so a
+        // Ctrl+Shift binding is matched before a Ctrl one with the same key.
+        let mut cmds: Vec<(keys::Cmd, KeyboardShortcut)> = keys::ALL.iter().filter_map(|c| keys::binding(&self.s.keybindings, *c).map(|b| (*c, b))).collect();
+        cmds.sort_by_key(|(_, b)| std::cmp::Reverse(b.modifiers.ctrl as u8 + b.modifiers.shift as u8 + b.modifiers.alt as u8));
+        for (cmd, b) in cmds {
+            if keys::consume_exact(ctx, &b) {
+                self.run_cmd(ctx, cmd);
+            }
+        }
+        // Fixed: Ctrl+1..9 = project tab n, Ctrl+wheel = font size.
+        for (k, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].into_iter().enumerate() {
+            if keys::consume_exact(ctx, &KeyboardShortcut::new(Modifiers::CTRL, key)) {
+                if let Some(p) = self.s.projects.get(k).map(|p| p.path.clone()) {
+                    self.select_project(Some(p));
+                }
+            }
+        }
+        let zoom = ctx.input(|i| i.events.iter().filter_map(|e| if let egui::Event::MouseWheel { delta, modifiers, .. } = e { modifiers.ctrl.then_some(delta.y) } else { None }).sum::<f32>());
+        if zoom != 0.0 {
+            self.s.font_size = (self.s.font_size + zoom.signum()).clamp(8.0, 32.0);
+        }
+    }
+
+    fn run_cmd(&mut self, ctx: &egui::Context, cmd: keys::Cmd) {
+        use keys::Cmd::*;
+        match cmd {
+            NewClaude | NewClaudeUnrestricted => {
+                let p = self.current_project();
+                if let Some(pr) = self.profiles.iter().find(|p| p.is_claude()).cloned().or_else(|| Some(self.default_profile())) {
+                    self.new_default(ctx, p, pr, cmd == NewClaudeUnrestricted);
+                }
+            }
+            NewDefault => {
+                let (p, pr) = (self.current_project(), self.default_profile());
+                self.new_default(ctx, p, pr, false);
+            }
+            CloseSession => {
+                if let Some(id) = self.active {
+                    self.close(id);
+                }
+            }
+            RenameSession => {
+                if let Some(t) = self.active_tab() {
+                    self.renaming = Some((t.sess.id, t.sess.display_name()));
+                    self.rename_focus = true;
+                }
+            }
+            NextSession | PrevSession => {
+                let order = self.project_sessions(&self.current_project());
+                if !order.is_empty() {
+                    let i = order.iter().position(|id| Some(*id) == self.active).unwrap_or(0);
+                    let n = order.len();
+                    self.select_session(order[if cmd == PrevSession { (i + n - 1) % n } else { (i + 1) % n }]);
+                }
+            }
+            NextProject | PrevProject => {
+                let mut tabs: Vec<Option<PathBuf>> = vec![None];
+                tabs.extend(self.s.projects.iter().map(|p| Some(p.path.clone())));
+                let i = tabs.iter().position(|t| *t == self.s.selected_project).unwrap_or(0);
+                let n = tabs.len();
+                let j = if cmd == PrevProject { (i + n - 1) % n } else { (i + 1) % n };
+                self.select_project(tabs[j].clone());
+            }
+            FontBigger => self.s.font_size = (self.s.font_size + 1.0).min(32.0),
+            FontSmaller => self.s.font_size = (self.s.font_size - 1.0).max(8.0),
+            FontReset => self.s.font_size = 15.0,
+            TogglePreviews => self.s.inline_previews = !self.s.inline_previews,
+            Options => self.options = Some(OptPage::General),
+            Plugins => self.open_plugins(),
+            Snippets => {
+                if self.active.is_some() {
+                    self.snippets_open = true;
+                    self.snippet_focus = true;
+                }
+            }
+            Find => {
+                if let Some(t) = self.active_tab_mut() {
+                    t.view.search.open();
+                }
+            }
+        }
+    }
+
+    fn set_pin(&mut self, id: u64, pin: u32) {
+        if let Some(t) = self.tabs.iter_mut().find(|t| t.sess.id == id) {
+            t.pin = pin;
+        }
+        if let Some(d) = self.dormant.iter_mut().find(|d| d.id == id) {
+            d.saved.pin = pin;
+        }
+    }
+
+    /// Turns a running session into a listed one (it resumes when clicked): auto-close.
+    fn park(&mut self, id: u64, why: &str) {
+        let Some(i) = self.tabs.iter().position(|t| t.sess.id == id) else { return };
+        let t = &self.tabs[i];
+        let saved = SavedSession {
+            project: t.project.clone(),
+            profile: t.sess.profile.clone(),
+            name: t.sess.name.clone(),
+            created: t.created,
+            title: t.sess.transcript_title.clone().or_else(|| t.sess.title.clone()),
+            agent_id: t.sess.agent_id.clone(),
+            opts: t.sess.opts.clone(),
+            cost: t.sess.cost.map(|c| c.usd),
+            pin: t.pin,
+        };
+        crate::dlog!("auto-close #{id} ({why}): {}", t.sess.display_name());
+        let nid = self.next_id;
+        self.next_id += 1;
+        self.dormant.push(Dormant { id: nid, saved });
+        self.tabs.remove(i);
+        if self.active == Some(id) {
+            self.active = None;
+        }
+    }
+
+    /// Window / tray / notification / auto-close housekeeping, once per frame.
+    fn housekeeping(&mut self, ctx: &egui::Context) {
+        crate::dlog::ENABLED.store(self.s.debug_logging, std::sync::atomic::Ordering::Relaxed);
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true)) && winsys::is_main_visible();
+
+        // Tray: needed for minimize-to-tray and for notifications.
+        if self.s.minimize_to_tray || self.s.notifications {
+            winsys::tray_show(ctx);
+        } else {
+            winsys::tray_hide();
+        }
+        // Started at sign-in (--minimized): into the tray, or just minimized without it.
+        if std::mem::take(&mut self.start_hidden) {
+            if self.s.minimize_to_tray {
+                winsys::hide_main();
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+        }
+        if self.s.minimize_to_tray && !winsys::QUITTING.load(std::sync::atomic::Ordering::Relaxed) {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                winsys::hide_main();
+            }
+            if ctx.input(|i| i.viewport().minimized) == Some(true) && winsys::is_main_visible() {
+                winsys::hide_main();
+            }
+        }
+        for e in winsys::take_events() {
+            if e == winsys::TrayEvent::NotificationClicked {
+                if let Some(id) = self.notified.take() {
+                    self.select_session(id);
+                }
+            }
+        }
+
+        // Hook events (Claude) and bells.
+        let keys: std::collections::HashSet<String> = self.tabs.iter().map(|t| t.sess.hook_key.clone()).collect();
+        let mut alerts: Vec<(u64, String)> = Vec::new();
+        for ev in crate::hooks::poll(&|k| keys.contains(k)) {
+            let active = self.active;
+            let Some(t) = self.tabs.iter_mut().find(|t| t.sess.hook_key == ev.key) else { continue };
+            crate::dlog!("hook {} for #{} {}", ev.event, t.sess.id, ev.message);
+            match ev.event.as_str() {
+                "start" => t.sess.set_conversation(ev.message.trim()),
+                "active" => {
+                    t.sess.busy = true;
+                    t.sess.attention = None;
+                }
+                "stop" | "notify" => {
+                    // Waiting for you either way (a Notification is e.g. a permission prompt).
+                    t.sess.busy = false;
+                    if ev.event == "stop" {
+                        t.sess.busy = false;
+                        // Messages waiting for this session to finish its turn may go now.
+                        let key = t.sess.hook_key.clone();
+                        for m in self.outbox.iter_mut().filter(|m| m.waiting_for.as_deref() == Some(key.as_str())) {
+                            m.waiting_for = None;
+                        }
+                    }
+                    let msg = if ev.message.trim().is_empty() {
+                        if ev.event == "stop" { "Claude is waiting for your input".to_string() } else { "Claude needs your attention".to_string() }
+                    } else {
+                        ev.message.clone()
+                    };
+                    crate::dlog!("attention check #{}: window focused={focused}, active={:?}", t.sess.id, active);
+                    if !(focused && active == Some(t.sess.id)) {
+                        t.sess.attention = Some(msg.clone());
+                        alerts.push((t.sess.id, msg));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let active = self.active;
+        for t in &mut self.tabs {
+            // Interrupted turns may not send Stop; Claude's spinner keeps output flowing while it
+            // works, so 20 s of silence means it isn't working any more.
+            if t.sess.busy && t.sess.idle_for() > Duration::from_secs(20) {
+                t.sess.busy = false;
+            }
+            if t.bell {
+                t.bell = false;
+                if t.sess.attention.is_none() && !(focused && active == Some(t.sess.id)) {
+                    t.sess.attention = Some("Bell".into());
+                    alerts.push((t.sess.id, "The session rang the bell".into()));
+                }
+            }
+            // Looking at it clears the mark.
+            if focused && active == Some(t.sess.id) {
+                t.sess.attention = None;
+            }
+        }
+        for (id, msg) in &alerts {
+            crate::dlog!("alert #{id}: {msg} (notifications={}, sound={}, flash={})", self.s.notifications, self.s.notify_sound, self.s.flash_taskbar);
+        }
+        for (id, msg) in alerts {
+            let Some(t) = self.tabs.iter().find(|t| t.sess.id == id) else { continue };
+            let project = self.s.projects.iter().find(|p| p.path == t.project).map(|p| p.name.clone()).unwrap_or_default();
+            let title = format!("{} · {}", t.sess.display_name(), project);
+            if self.s.notifications {
+                winsys::notify(ctx, &title, &msg);
+                if self.s.notify_sound {
+                    winsys::play_notification_sound();
+                }
+                self.notified = Some(id);
+            }
+            if self.s.flash_taskbar && !focused {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+        }
+
+        // Taskbar badge: a mark (or the count) while sessions need attention.
+        let count = self.tabs.iter().filter(|t| t.sess.attention.is_some()).count();
+        let want = (count > 0).then(|| if self.s.badge_count { count } else { 0 });
+        if self.last_badge != Some(want) {
+            match want {
+                Some(n) => {
+                    let (px, s) = winsys::badge_rgba(self.s.badge_count.then_some(n), self.s.badge_color, self.s.badge_text_color);
+                    winsys::set_badge(Some((&px, s)), &format!("{count} session(s) need attention"));
+                }
+                None => winsys::set_badge(None, ""),
+            }
+            self.last_badge = Some(want);
+        }
+
+        // Session management: idle timeout and memory threshold (every 15 s).
+        if self.last_manage.elapsed() >= Duration::from_secs(15) {
+            self.last_manage = std::time::Instant::now();
+            let manageable = |t: &Tab, active: Option<u64>| t.sess.profile.is_agent() && t.sess.agent_id.is_some() && t.sess.exited.is_none() && !t.sess.busy && active != Some(t.sess.id);
+            if self.s.idle_close_minutes > 0 {
+                let limit = Duration::from_secs(self.s.idle_close_minutes as u64 * 60);
+                let ids: Vec<u64> = self.tabs.iter().filter(|t| manageable(t, self.active) && t.sess.idle_for() >= limit).map(|t| t.sess.id).collect();
+                for id in ids {
+                    self.park(id, "idle timeout");
+                }
+            }
+            if self.s.memory_threshold_gb > 0.0 && winsys::memory_used_gb() > self.s.memory_threshold_gb as f64 {
+                let oldest = self.tabs.iter().filter(|t| manageable(t, self.active) && t.sess.idle_for() >= Duration::from_secs(60)).max_by_key(|t| t.sess.idle_for()).map(|t| t.sess.id);
+                if let Some(id) = oldest {
+                    self.park(id, "memory threshold");
+                }
+            }
+        }
+        // Hook events wake the UI themselves (hooks::watch); session management runs every 15 s.
+        if self.s.idle_close_minutes > 0 || self.s.memory_threshold_gb > 0.0 {
+            ctx.request_repaint_after(Duration::from_secs(15));
+        }
+    }
+
+    fn add_project(&mut self, ctx: &egui::Context) {
+        if let Some(dir) = rfd::FileDialog::new().set_title("Add project folder").pick_folder() {
+            if !self.s.projects.iter().any(|p| p.path == dir) {
+                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false });
+            }
+            let _ = ctx;
+            self.select_project(Some(dir));
+        }
+    }
+
+}
+
+impl eframe::App for App {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.s.sessions = self.sidebar_order().iter().filter_map(|id| self.tabs.iter().find(|t| t.sess.id == *id)).filter(|t| t.sess.profile.is_agent())
+            .map(|t| SavedSession {
+                project: t.project.clone(),
+                profile: t.sess.profile.clone(),
+                name: t.sess.name.clone(),
+                created: t.created,
+                title: t.sess.transcript_title.clone().or_else(|| t.sess.title.clone()),
+                agent_id: t.sess.agent_id.clone(),
+                opts: t.sess.opts.clone(),
+                cost: t.sess.cost.map(|c| c.usd),
+                pin: t.pin,
+            })
+            .collect();
+        // Listed sessions that weren't started this time stay in the list.
+        self.s.sessions.extend(self.dormant.iter().map(|d| d.saved.clone()));
+        eframe::set_value(storage, eframe::APP_KEY, &self.s);
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.time) < 6.0 {
+            crate::titlebar::apply();
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if self.applied.0 != self.s.code_font || self.applied.1 != self.s.ui_size {
+            install_fonts(&ctx, &self.s.code_font);
+            apply_style(&ctx, self.s.ui_size);
+            self.applied = (self.s.code_font.clone(), self.s.ui_size);
+        }
+        self.cache.pump(&ctx);
+        agents::COLOR_TAG_PROMPT.store(self.s.color_tag_prompt && self.s.color_tags, std::sync::atomic::Ordering::Relaxed);
+
+        // Terminal events (title, exit, OSC 52 clipboard) and activity marks.
+        let active = self.active;
+        let claimed: std::collections::HashSet<String> =
+            self.tabs.iter().filter_map(|t| t.sess.agent_id.clone()).chain(self.dormant.iter().filter_map(|d| d.saved.agent_id.clone())).collect();
+        for t in &mut self.tabs {
+            t.sess.poll_agent(&claimed);
+            let (clip, bell) = t.sess.poll();
+            if let Some(clip) = clip {
+                ctx.copy_text(clip);
+            }
+            t.bell |= bell;
+            if Some(t.sess.id) != active && t.sess.dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                t.sess.unseen = true;
+            }
+            if Some(t.sess.id) == active {
+                t.sess.unseen = false;
+            }
+        }
+        self.mcp_pump(&ctx);
+        self.housekeeping(&ctx);
+        let title = self.active_tab().map(|t| format!("{} — AI Terminal", t.sess.display_name())).unwrap_or_else(|| "AI Terminal".into());
+        // Only when it changes: every viewport command requests another frame, so sending it
+        // each frame kept the app redrawing nonstop.
+        if self.last_title != title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
+        }
+
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.snippets_open;
+        if !modal_open {
+            self.shortcuts(&ctx);
+            self.handle_drops(&ctx);
+        }
+
+        egui::Panel::top("topbar")
+            .exact_size(44.0)
+            .frame(egui::Frame::new().fill(BAR).inner_margin(egui::Margin { left: 4, right: 4, top: 0, bottom: 0 }).stroke(Stroke::new(1.0, BORDER)))
+            .show(ui, |ui| self.topbar(ui));
+        egui::Panel::bottom("status").exact_size(26.0).frame(egui::Frame::new().fill(BAR).inner_margin(egui::Margin::symmetric(10, 2))).show(ui, |ui| self.status_bar(ui));
+        let home = self.s.selected_project.is_none();
+        if !home {
+            egui::Panel::left("sidebar")
+                .resizable(true)
+                .default_size(300.0)
+                .min_size(200.0)
+                .frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(10, 4)))
+                .show(ui, |ui| self.sidebar(ui));
+        }
+        if self.active.is_some() {
+            egui::Panel::top("session_header").exact_size(40.0).frame(egui::Frame::new().fill(PANEL).inner_margin(egui::Margin::symmetric(12, 4)).stroke(Stroke::new(1.0, BORDER))).show(ui, |ui| self.header(ui));
+        }
+
+        let mut actions = Vec::new();
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(term_theme::c(self.s.term_theme.background))).show(ui, |ui| {
+            let theme = self.s.term_theme.clone();
+            let opt = ViewOptions { font_size: self.s.font_size, theme: &theme, inline_previews: self.s.inline_previews, preview_max_px: self.s.preview_max_px, preview_over_text: self.s.preview_over_text, shift_enter_alt: self.s.shift_enter_alt, color_tags: self.s.color_tags };
+            let focus = std::mem::take(&mut self.focus_terminal) && !modal_open && self.renaming.is_none() && self.renaming_project.is_none();
+            let a = self.active;
+            if home {
+                ui.painter().rect_filled(ui.max_rect(), 0.0, BG);
+                self.home(ui);
+            } else if let Some(tab) = self.tabs.iter_mut().find(|t| Some(t.sess.id) == a) {
+                actions = view::show(ui, &mut tab.sess, &mut tab.view, &mut self.cache, &opt, focus);
+            } else {
+                self.empty_project(ui);
+            }
+            // Drop hint.
+            if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+                let r = ui.max_rect().shrink(20.0);
+                ui.painter().rect_filled(r, 10.0, Color32::from_rgba_unmultiplied(0, 120, 212, 40));
+                ui.painter().rect_stroke(r, 10.0, Stroke::new(2.0, ACCENT_HI), egui::StrokeKind::Inside);
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "Drop to paste the file paths", egui::FontId::new(18.0, bold()), TEXT);
+            }
+        });
+        for a in actions {
+            match a {
+                Action::Paste => self.paste(&ctx),
+                Action::Copy(t) => ctx.copy_text(t),
+                Action::OpenLink(link) => match link {
+                    crate::links::Link::Url(u) => crate::links::open_url(&u),
+                    crate::links::Link::File { path, line, col } => {
+                        let cwd = self.active_tab().map(|t| t.sess.cwd.clone()).unwrap_or_default();
+                        match crate::links::resolve(&path, &cwd) {
+                            Some(full) => {
+                                if let Err(e) = crate::links::open_file(&full, line, col, &self.s.editor, &self.s.editor_custom) {
+                                    self.toast(format!("Couldn't open {}: {e}", full.display()), RED, &ctx);
+                                }
+                            }
+                            None => self.toast(format!("{path} not found"), RED, &ctx),
+                        }
+                    }
+                },
+                Action::View(p) => {
+                    let list = self.active_tab().map(|t| t.sess.pasted_images.clone()).unwrap_or_default();
+                    let list = if list.contains(&p) { list } else { vec![p.clone()] };
+                    self.viewer = Some(Viewer { path: p, list, zoom_fit: true });
+                }
+            }
+        }
+
+        self.viewer(&ctx);
+        self.options_window(&ctx);
+        self.launch_dialog(&ctx);
+        self.snippets_palette(&ctx);
+        self.plugins_window(&ctx);
+        self.mcp_servers_window(&ctx);
+        self.clear_dialog(&ctx);
+        self.show_toast(&ctx);
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Local UTC offset in seconds (from the OS clock; no time-zone crate needed).
+fn utc_offset() -> i64 {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct SystemTime {
+            year: u16,
+            month: u16,
+            dow: u16,
+            day: u16,
+            hour: u16,
+            minute: u16,
+            second: u16,
+            ms: u16,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetLocalTime(t: *mut SystemTime);
+            fn GetSystemTime(t: *mut SystemTime);
+        }
+        let (mut l, mut u) = (SystemTime::default(), SystemTime::default());
+        unsafe {
+            GetLocalTime(&mut l);
+            GetSystemTime(&mut u);
+        }
+        let mins = |t: &SystemTime| t.hour as i64 * 60 + t.minute as i64;
+        let mut d = mins(&l) - mins(&u);
+        // Different calendar days: the offset wrapped around midnight.
+        if (l.year, l.month, l.day) > (u.year, u.month, u.day) {
+            d += 24 * 60;
+        } else if (l.year, l.month, l.day) < (u.year, u.month, u.day) {
+            d -= 24 * 60;
+        }
+        d * 60
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+/// Local day number (days since 1970-01-01 in local time).
+fn local_day(secs: u64) -> i64 {
+    (secs as i64 + utc_offset()).div_euclid(86400)
+}
+
+fn day_label(today: i64, day: i64) -> String {
+    match today - day {
+        i64::MIN..=0 => "Today".into(),
+        1 => "Yesterday".into(),
+        2..=6 => "This week".into(),
+        7..=30 => "This month".into(),
+        _ => "Older".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn day_groups() {
+        assert_eq!(day_label(100, 100), "Today");
+        assert_eq!(day_label(100, 99), "Yesterday");
+        assert_eq!(day_label(100, 95), "This week");
+        assert_eq!(day_label(100, 80), "This month");
+        assert_eq!(day_label(100, 1), "Older");
+        assert!(utc_offset().abs() <= 14 * 3600);
+    }
+}
+
+fn is_home_dir(p: &Path) -> bool {
+    std::env::var_os("USERPROFILE").is_some_and(|h| Path::new(&h) == p)
+}
+
+/// Short status shown at the right of a session row: working / waiting for permission / needs you.
+fn status_label(row: &Row) -> Option<&'static str> {
+    if row.busy {
+        return Some("working…");
+    }
+    let m = row.attention_msg.as_ref()?;
+    Some(if m.to_lowercase().contains("permission") { "permission" } else { "needs you" })
+}

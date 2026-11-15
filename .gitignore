@@ -1,0 +1,7 @@
+/target
+/dist
+*.png
+!assets/*.png
+run.log
+/backups
+.claude/settings.local.json
