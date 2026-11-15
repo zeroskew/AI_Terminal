@@ -31,7 +31,7 @@ impl App {
     }
 
     pub(super) fn project_json(&self, p: &Project) -> serde_json::Value {
-        serde_json::json!({ "name": p.name, "path": p.path.display().to_string(), "isActive": self.s.selected_project.as_ref() == Some(&p.path), "sessionCount": self.project_session_count(&p.path) })
+        serde_json::json!({ "name": p.name, "path": p.path.display().to_string(), "isActive": self.s.selected_project.as_ref() == Some(&p.path), "inTabs": p.in_tabs, "sessionCount": self.project_session_count(&p.path) })
     }
 
     /// All session ids (running and listed).
@@ -63,7 +63,7 @@ impl App {
             return Err(format!("More than one session is called '{q}'; use its terminalKey from list_sessions."));
         }
         let project = if let Some(n) = ql.strip_prefix("tab ").and_then(|n| n.trim().parse::<usize>().ok()) {
-            self.s.projects.get(n.saturating_sub(1)).map(|p| p.path.clone())
+            self.tab_projects().get(n.saturating_sub(1)).cloned()
         } else {
             self.s.projects.iter().find(|p| p.name.to_lowercase() == ql).map(|p| p.path.clone())
         };

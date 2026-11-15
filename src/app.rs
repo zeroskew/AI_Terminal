@@ -19,6 +19,7 @@ use crate::winsys;
 use crate::{keys, mcp, plugins};
 
 mod plugins_ui;
+mod scripts;
 mod snippets;
 mod options;
 mod mcp_api;
@@ -35,6 +36,14 @@ pub struct Project {
     pub path: PathBuf,
     pub name: String,
     pub collapsed: bool,
+    /// Shown as a tab in the top bar. Home always lists every project; closing a tab only
+    /// clears this (the project, its sessions and its settings stay).
+    #[serde(default = "yes")]
+    pub in_tabs: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -381,6 +390,8 @@ pub struct App {
     mcp_servers: Option<mcp_servers_ui::McpServersUi>,
     /// The status bar's "clear" asks first: the session it's for.
     confirm_clear: Option<u64>,
+    /// Home's "Remove" on a project asks first: the project it's for.
+    confirm_remove_project: Option<PathBuf>,
     /// Plan usage limits (5-hour / weekly) from Claude's status line, and when they were read.
     limits: Option<crate::hooks::Limits>,
     limits_read: Option<(std::time::Instant, Option<std::time::SystemTime>)>,
@@ -394,6 +405,10 @@ pub struct App {
     snippets_open: bool,
     snippet_filter: String,
     snippet_focus: bool,
+    scripts_open: bool,
+    script_filter: String,
+    script_focus: bool,
+    scripts: Vec<scripts::Script>,
     outbox: Vec<Pending>,
     next_msg: u64,
     /// Sessions that get Enter shortly (after a pasted message landed).
@@ -455,7 +470,7 @@ impl App {
         crate::hooks::watch(cc.egui_ctx.clone());
         if s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false });
+            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true });
         }
         std::thread::spawn(|| images::cleanup(Duration::from_secs(7 * 24 * 3600)));
         let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
@@ -488,6 +503,7 @@ impl App {
             plugins: None,
             mcp_servers: None,
             confirm_clear: None,
+            confirm_remove_project: None,
             limits: None,
             limits_read: None,
             plan_usage: Default::default(),
@@ -499,6 +515,10 @@ impl App {
             snippets_open: false,
             snippet_filter: String::new(),
             snippet_focus: false,
+            scripts_open: false,
+            script_filter: String::new(),
+            script_focus: false,
+            scripts: Vec::new(),
             outbox: Vec::new(),
             next_msg: 0,
             enter_due: Vec::new(),
@@ -574,7 +594,7 @@ impl App {
             if w[0] == "--add-project" {
                 let dir = PathBuf::from(&w[1]);
                 if !app.s.projects.iter().any(|p| p.path == dir) {
-                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false });
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true });
                 }
                 app.s.selected_project = Some(dir);
             }
@@ -584,6 +604,9 @@ impl App {
                 let pr = app.current_project();
                 app.open_launch_dialog(pr, p, None);
             }
+        }
+        if args.iter().any(|a| a == "--home") {
+            app.select_project(None);
         }
         if args.iter().any(|a| a == "--options") {
             app.options = Some(OptPage::Terminal);
@@ -621,6 +644,9 @@ impl App {
             app.s.debug_logging = true;
             crate::dlog::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        if args.iter().any(|a| a == "--scripts") {
+            app.open_scripts();
+        }
         if args.iter().any(|a| a == "--plugins") {
             app.open_plugins();
         }
@@ -636,6 +662,11 @@ impl App {
                     let pr = app.current_project();
                     app.spawn(&ctx, pr, p, String::new());
                 }
+            }
+        }
+        for w in args.windows(2) {
+            if w[0] == "--run-script" {
+                app.run_script_named(&ctx, &w[1]);
             }
         }
         for w in args.windows(2) {
@@ -670,8 +701,17 @@ impl App {
         self.s.selected_project.clone().filter(|p| self.s.projects.iter().any(|x| &x.path == p)).unwrap_or_else(|| self.s.projects[0].path.clone())
     }
 
-    /// Selects a project tab (None = Home) and shows the session last used there.
+    /// Projects shown as tabs, in tab order (Ctrl+1…9 and "tab N" count these).
+    fn tab_projects(&self) -> Vec<PathBuf> {
+        self.s.projects.iter().filter(|p| p.in_tabs).map(|p| p.path.clone()).collect()
+    }
+
+    /// Selects a project tab (None = Home) and shows the session last used there. Opening a
+    /// project whose tab was closed brings its tab back.
     fn select_project(&mut self, p: Option<PathBuf>) {
+        if let Some(proj) = p.as_ref().and_then(|p| self.s.projects.iter_mut().find(|x| &x.path == p)) {
+            proj.in_tabs = true;
+        }
         self.active = p.as_ref().and_then(|p| {
             let ids = self.project_sessions(p);
             self.remembered.get(p).copied().filter(|id| ids.contains(id)).or(ids.first().copied())
@@ -864,7 +904,7 @@ impl App {
         // Fixed: Ctrl+1..9 = project tab n, Ctrl+wheel = font size.
         for (k, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].into_iter().enumerate() {
             if keys::consume_exact(ctx, &KeyboardShortcut::new(Modifiers::CTRL, key)) {
-                if let Some(p) = self.s.projects.get(k).map(|p| p.path.clone()) {
+                if let Some(p) = self.tab_projects().get(k).cloned() {
                     self.select_project(Some(p));
                 }
             }
@@ -909,7 +949,7 @@ impl App {
             }
             NextProject | PrevProject => {
                 let mut tabs: Vec<Option<PathBuf>> = vec![None];
-                tabs.extend(self.s.projects.iter().map(|p| Some(p.path.clone())));
+                tabs.extend(self.tab_projects().into_iter().map(Some));
                 let i = tabs.iter().position(|t| *t == self.s.selected_project).unwrap_or(0);
                 let n = tabs.len();
                 let j = if cmd == PrevProject { (i + n - 1) % n } else { (i + 1) % n };
@@ -927,6 +967,7 @@ impl App {
                     self.snippet_focus = true;
                 }
             }
+            Scripts => self.open_scripts(),
             Find => {
                 if let Some(t) = self.active_tab_mut() {
                     t.view.search.open();
@@ -1122,7 +1163,7 @@ impl App {
     fn add_project(&mut self, ctx: &egui::Context) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Add project folder").pick_folder() {
             if !self.s.projects.iter().any(|p| p.path == dir) {
-                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false });
+                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true });
             }
             let _ = ctx;
             self.select_project(Some(dir));
@@ -1194,7 +1235,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.snippets_open;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.confirm_remove_project.is_some() || self.snippets_open || self.scripts_open;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1270,9 +1311,11 @@ impl eframe::App for App {
         self.options_window(&ctx);
         self.launch_dialog(&ctx);
         self.snippets_palette(&ctx);
+        self.scripts_palette(&ctx);
         self.plugins_window(&ctx);
         self.mcp_servers_window(&ctx);
         self.clear_dialog(&ctx);
+        self.remove_project_dialog(&ctx);
         self.show_toast(&ctx);
     }
 }

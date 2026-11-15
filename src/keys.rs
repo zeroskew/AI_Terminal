@@ -22,11 +22,13 @@ pub enum Cmd {
     Plugins,
     Find,
     Snippets,
+    Scripts,
 }
 
-pub const ALL: [Cmd; 17] = [
+pub const ALL: [Cmd; 18] = [
     Cmd::Find,
     Cmd::Snippets,
+    Cmd::Scripts,
     Cmd::NewClaude,
     Cmd::NewClaudeUnrestricted,
     Cmd::NewDefault,
@@ -65,6 +67,7 @@ impl Cmd {
             Cmd::Plugins => "app.plugins",
             Cmd::Find => "terminal.find",
             Cmd::Snippets => "snippets.palette",
+            Cmd::Scripts => "scripts.palette",
         }
     }
 
@@ -87,6 +90,7 @@ impl Cmd {
             Cmd::Plugins => "Claude Code plugins",
             Cmd::Find => "Find in terminal",
             Cmd::Snippets => "Insert a snippet",
+            Cmd::Scripts => "Run a script",
         }
     }
 
@@ -111,6 +115,7 @@ impl Cmd {
             Cmd::Plugins => return None,
             Cmd::Find => KeyboardShortcut::new(cs, Key::F),
             Cmd::Snippets => KeyboardShortcut::new(cs, Key::S),
+            Cmd::Scripts => KeyboardShortcut::new(cs, Key::R),
         })
     }
 }

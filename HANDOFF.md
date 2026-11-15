@@ -33,9 +33,11 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
   - `--start <Claude|Codex|pwsh|powershell|cmd>`
   - `--type "<line>"` and `--paste-image <file>` and `--find <text>`: run after `--start`
   - `--options`, `--options-page <general|images|snippets|shortcuts|about>`, `--launch-dialog`
+  - `--scripts` (opens the palette), `--run-script "<name>"` (runs a script in the selected project; `--type` after it feeds its input)
   - `--plugins`, `--plugins-sources`, `--view-image <file>`
   - `--debug-log` (log goes to `%LOCALAPPDATA%\AI_Terminal\logs\ai_terminal.log`)
   - `--no-previews`, `--pin <n>`
+  - `--home` (opens on the Home page)
 - Real Claude end-to-end runs (`--start Claude --type "..."`) work; Claude opens in the selected
   project; pass `--add-project` with an already-trusted folder, or Claude stops at its trust prompt.
 
@@ -45,7 +47,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 |---|---|
 | `main.rs` | Entry; `--hook` / `--statusline` modes exit early (hooks.rs); drops inherited `CLAUDE_*` session env; `--test-instance` app name |
 | `app.rs` (1.4k) | App state, types, `eframe::App` (frame loop), sessions, shortcuts, housekeeping; UI split into `app/*.rs` below |
-| `app/*.rs` | `impl App` blocks by area: `topbar`, `sidebar`, `pages` (home / empty project), `launch`, `options`, `snippets`, `plugins_ui`, `mcp_servers_ui`, `status_bar` (usage limits; compact / context / clear (confirmation dialog) / MCP servers links), `viewer` (+ toasts), `mcp_api` (ai-terminal MCP tool handlers) |
+| `app/*.rs` | `impl App` blocks by area: `topbar`, `sidebar`, `pages` (home / empty project), `launch`, `options`, `snippets`, `scripts` (palette for `<exe dir>\scripts`, sample from `assets/scripts/`), `plugins_ui`, `mcp_servers_ui`, `status_bar` (usage limits; compact / context / clear (confirmation dialog) / MCP servers links), `viewer` (+ toasts), `mcp_api` (ai-terminal MCP tool handlers) |
 | `view.rs` | Terminal widget: grid snapshot under the alacritty lock, painting, box-drawing as shapes, keys→bytes, mouse/selection, image refs + inline previews, colour tags, Ctrl+links, find bar |
 | `session.rs` | One PTY session: alacritty_terminal `Term` + ConPTY event loop, `Profile` detection, launch args, agent id / transcript title / cost polling, activity times |
 | `agents.rs` | Claude/Codex launch flags (`build_args`), model catalogues (`claude --help`, `codex debug models`), transcript lookup (`~/.claude/projects/<mangled cwd>`, `~/.codex/sessions`), titles; statics for hook settings / MCP config / colour-tag prompt |
@@ -57,7 +59,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 | `cost.rs` | Cost/tokens from transcripts (Claude: dedupe by message id, subagents included; Codex: token_count), `assets/pricing.json` (user override `%APPDATA%\AI Terminal\pricing.json`) |
 | `plugins.rs` | Claude Code plugin catalogue (marketplace.json files + built-in directory cache), installed list, background `claude plugin …` jobs |
 | `mcp_servers.rs` | Per-project MCP on/off: `claude mcp list` (parsed) + `~/.claude.json` `projects[<path>].disabledMcpServers` (what `/mcp` writes); built-in `claude-artifacts` (not in `mcp list`) via a `permissions.deny: ["Artifact"]` rule in `<project>/.claude/settings.local.json` (Claude Code 2.1.325 skips the server when the Artifact tool is denied; env `CLAUDE_CODE_ARTIFACT=0` also works); `describe()` = per-server help text |
-| `keys.rs` | Reassignable shortcuts (17 commands, stored as text overrides) |
+| `keys.rs` | Reassignable shortcuts (18 commands, stored as text overrides) |
 | `links.rs` | URL / file:line detection, open in browser / editor |
 | `winsys.rs` | Tray icon + toast (Shell_NotifyIcon), Run-key autostart, taskbar overlay badge, memory reading, sound |
 | `fonts.rs` | CSS-style font list resolved against installed fonts by family name (default list in `fonts::DEFAULT_LIST`) |
@@ -68,7 +70,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 - projects, live `Tab`s and `Dormant` (listed, not running) sessions
 - top bar (project tabs, drag to reorder) and sidebar (sessions: day groups / pinned, live status, cost, rename, context menu)
 - new-session menu and launch dialog; Options window (General / Terminal / Images / Snippets / Shortcuts / About)
-- plugins window, image viewer, snippets palette
+- plugins window, image viewer, snippets and scripts palettes
 - `housekeeping` (tray, hooks → attention/notifications/badge, auto-close), `mcp_pump` (tool calls, message delivery)
 
 ## Session behaviour
