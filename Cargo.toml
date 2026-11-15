@@ -1,0 +1,38 @@
+[package]
+name = "ai_terminal"
+version = "0.1.0"
+edition = "2021"
+description = "AI Terminal: a tabbed terminal for AI CLI sessions with inline previews of pasted images"
+
+[[bin]]
+name = "ai_terminal"
+path = "src/main.rs"
+
+[dependencies]
+egui = "0.37"
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "persistence", "clipboard", "accesskit"] }
+serde = { version = "1", features = ["derive"] }
+alacritty_terminal = "0.26"
+arboard = { version = "3.7", default-features = false, features = ["image-data"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+regex = "1"
+rfd = "0.18.0"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+
+
+# Icon generator: build.cmd run --example mkicon
+[[example]]
+name = "mkicon"
+path = "tools/mkicon.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_Media_Audio", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_DirectWrite", "Win32_Graphics_Imaging", "Win32_Graphics_Dxgi_Common", "Win32_System_Com", "Foundation_Numerics"] }
