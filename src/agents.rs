@@ -82,6 +82,13 @@ fn strip_flag(params: &mut Vec<String>, flags: &[&str]) {
 /// When set, Claude sessions get `--append-system-prompt` describing AI Terminal's colour tags.
 pub static COLOR_TAG_PROMPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// When set, new Claude sessions (not resumed, not named at launch) are asked to name themselves
+/// after their first task with the `rename_session` MCP tool.
+pub static NAME_SESSION_PROMPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The naming instruction (see `NAME_SESSION_PROMPT`).
+pub const NAME_SESSION_TEXT: &str = "This session runs in AI Terminal, whose sidebar lists sessions by name. When the user gives you the first task of this conversation, call the rename_session tool (ai-terminal MCP server) once with a short name for that task (2 to 6 words, e.g. \"Fix login redirect bug\"), then carry on with the task. Do this only once: don't rename the session again later in the conversation. Don't mention the renaming to the user.";
+
 /// The hooks settings file Claude sessions get (`--settings`), so the app hears when a session
 /// needs attention (see hooks.rs).
 pub static HOOK_SETTINGS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -116,6 +123,21 @@ pub fn write_mcp_config() -> Option<PathBuf> {
 
 /// Arguments for a session (after the program's own base args). `session_key` identifies the
 /// session to AI Terminal's MCP server.
+/// The `--append-system-prompt` text for a Claude session: the colour-tag guide and/or the
+/// naming instruction (only for a new conversation the user didn't name at launch).
+fn appended_prompt(color_tags: bool, name_sessions: bool, name: &str, resume: Option<&str>) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if color_tags {
+        parts.push(crate::colortags::PROMPT);
+    }
+    if name_sessions && resume.is_none() && name.trim().is_empty() {
+        parts.push(NAME_SESSION_TEXT);
+    }
+    (!parts.is_empty()).then(|| parts.join("
+
+"))
+}
+
 pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str>, session_key: &str) -> Vec<String> {
     let mut params = split_params(&opts.cli_params);
     let mut a: Vec<String> = Vec::new();
@@ -148,8 +170,13 @@ pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str
                     a.splice(0..0, ["--settings".to_string(), path]);
                 }
             }
-            if COLOR_TAG_PROMPT.load(std::sync::atomic::Ordering::Relaxed) && !a.iter().any(|x| x == "--append-system-prompt") {
-                a.extend(["--append-system-prompt".into(), crate::colortags::PROMPT.into()]);
+            // Our instructions, in one --append-system-prompt, unless the user passes their own.
+            if !a.iter().any(|x| x == "--append-system-prompt") {
+                let color = COLOR_TAG_PROMPT.load(std::sync::atomic::Ordering::Relaxed);
+                let naming = NAME_SESSION_PROMPT.load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(prompt) = appended_prompt(color, naming, name, resume) {
+                    a.extend(["--append-system-prompt".into(), prompt]);
+                }
             }
             if !name.trim().is_empty() {
                 a.extend(["-n".into(), name.trim().to_string()]);
@@ -488,6 +515,17 @@ pub fn codex_title(id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn naming_prompt_only_for_new_unnamed_sessions() {
+        let both = appended_prompt(true, true, "", None).unwrap();
+        assert!(both.starts_with(crate::colortags::PROMPT) && both.ends_with(NAME_SESSION_TEXT));
+        assert_eq!(appended_prompt(false, true, "", None).as_deref(), Some(NAME_SESSION_TEXT));
+        assert_eq!(appended_prompt(false, true, "", Some("id")), None);
+        assert_eq!(appended_prompt(false, true, "Fix build", None), None);
+        assert_eq!(appended_prompt(true, true, "", Some("id")).as_deref(), Some(crate::colortags::PROMPT));
+        assert_eq!(appended_prompt(false, false, "", None), None);
+    }
 
     #[test]
     fn params_split_and_flags() {

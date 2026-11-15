@@ -485,6 +485,8 @@ impl App {
             });
         });
         ui.checkbox(&mut self.s.reopen_sessions, "Keep sessions in the list after restart (resume on click)");
+        ui.checkbox(&mut self.s.name_sessions, "Ask Claude to name new sessions after their first task");
+        ui.label(RichText::new("Sent with each new Claude session (--append-system-prompt); Claude renames the session through AI Terminal's rename_session tool. Not used when you name the session at launch.").size(12.0).color(TEXT_FAINT));
         ui.checkbox(&mut self.s.shift_enter_alt, "Shift+Enter inserts a newline (sends ESC+CR, for Claude Code)");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.s.show_cost, "Show session usage as");
