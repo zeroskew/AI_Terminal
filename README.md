@@ -5,11 +5,15 @@ images inside the terminal**.
 
 ## Features
 
-- **Layout**: project tabs across the top (Home + one tab per project
-  folder; a dot shows sessions, orange when one has new output), "Add Project" on the right.
+- **Layout**: project tabs across the top (Home + a tab per project ticked **Show in tabs**;
+  a dot shows sessions, orange when one has new output), "Add Project" on the right.
   The left panel shows the selected project: the **New Claude session ▼** split button, the
   SESSIONS list (Today / Yesterday / This week…), a filter box and the Options gear. Home shows
-  a card per project. Right-click a project tab to rename / remove it.
+  a card for every project, with **Show in tabs** and **Remove**. Closing a tab (its ×,
+  middle-click, or right-click > Close tab) only unticks Show in tabs: the project stays on Home
+  and its sessions keep running; opening it from Home brings the tab back. **Remove** (asks
+  first) drops the project from the app only; the folder and its files are never deleted.
+  Right-click a project tab to rename it.
 - **Sessions** (terminal only). Nothing starts when the app opens. The ▼ menu has:
   - **New Claude session** (`claude --permission-mode auto`), **(unrestricted)**
     (`--dangerously-skip-permissions`) and **(with settings)**: name, model and effort (lists
@@ -107,7 +111,7 @@ so the agent can work with the app itself:
 
 | Tool | What it does |
 |---|---|
-| `list_projects` / `list_sessions` | Projects (name, path, active, session count) / sessions (id, terminal key, name, state, project) |
+| `list_projects` / `list_sessions` | Projects (name, path, active, in tabs, session count) / sessions (id, terminal key, name, state, project) |
 | `get_selection` | The active project tab and its selected session |
 | `whoami` | The calling session's own row |
 | `rename_session` | Rename the calling session ("can you rename this session?") |
@@ -143,6 +147,12 @@ after saving.
   when it waits (from the hooks), also as a pill in the session header.
 - **Snippets** (Options > Snippets, Ctrl+Shift+S or the header button): saved prompts inserted as a
   paste, optionally followed by Enter.
+- **Scripts** (Ctrl+Shift+R or the header button): `.ps1`, `.cmd`, `.bat` and `.py` files in the
+  `scripts` folder next to `ai_terminal.exe`, run in the current project as their own session
+  (output stays in the tab; Restart runs it again). The palette shows each script's first comment
+  line. The folder is created on first use with a sample, "Commit and push": one small Claude Haiku
+  call (`claude -p`, no tools, short system prompt, ~1.5k tokens) writes the message from the
+  diff, then it asks before committing and pushing.
 - **Cost**: estimated cost and tokens per session from the transcript (Claude: per message,
   subagents included; Codex: token totals), in the list, the header (breakdown on hover) and the
   project tab tooltip. Prices: `assets\pricing.json`, overridable with

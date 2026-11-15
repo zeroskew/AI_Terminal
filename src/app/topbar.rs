@@ -12,6 +12,7 @@ impl App {
         let bar = ui.max_rect();
         let mut select: Option<Option<PathBuf>> = None;
         let mut remove: Option<PathBuf> = None;
+        let mut hide: Option<PathBuf> = None;
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // Home.
@@ -36,7 +37,7 @@ impl App {
             let mut x = r.right() + 4.0;
             let mut overflow: Vec<Project> = Vec::new();
             let mut tab_rects: Vec<(PathBuf, egui::Rect)> = Vec::new();
-            for proj in self.s.projects.clone() {
+            for proj in self.s.projects.clone().into_iter().filter(|p| p.in_tabs) {
                 let sel = self.s.selected_project.as_ref() == Some(&proj.path);
                 let ids = self.project_sessions(&proj.path);
                 let unseen = self.tabs.iter().any(|t| t.project == proj.path && t.sess.unseen);
@@ -55,7 +56,8 @@ impl App {
                 let font = egui::FontId::new(13.5, if sel { bold() } else { egui::FontFamily::Proportional });
                 let g = ui.painter().layout_no_wrap(proj.name.clone(), font, TEXT);
                 let dot_w = if dot.is_some() { 14.0 } else { 0.0 };
-                let w = g.size().x + dot_w + 32.0;
+                let close_w = 18.0;
+                let w = g.size().x + dot_w + 32.0 + close_w;
                 if x + w > x_end - 30.0 && !sel {
                     overflow.push(proj);
                     continue;
@@ -78,6 +80,22 @@ impl App {
                 }
                 let tc = if sel || resp.hovered() { TEXT } else { TEXT_DIM };
                 p.galley_with_override_text_color(egui::pos2(tx, tr.center().y - g.size().y / 2.0), g, tc);
+                // × (on hover / selected): closes the tab; the project stays on Home.
+                let xr = egui::Rect::from_center_size(egui::pos2(tr.right() - 8.0 - close_w / 2.0, tr.center().y), Vec2::splat(16.0));
+                let xresp = ui.interact(xr, egui::Id::unique(("project_tab_close", &proj.path)), Sense::click());
+                if resp.hovered() || xresp.hovered() || sel {
+                    let p = ui.painter();
+                    if xresp.hovered() {
+                        p.rect_filled(xr, 3.0, CARD_HI);
+                    }
+                    let (c, k) = (xr.center(), 3.5);
+                    let st = Stroke::new(1.3, if xresp.hovered() { TEXT } else { TEXT_FAINT });
+                    p.line_segment([c + Vec2::new(-k, -k), c + Vec2::new(k, k)], st);
+                    p.line_segment([c + Vec2::new(-k, k), c + Vec2::new(k, -k)], st);
+                }
+                if xresp.on_hover_text("Close tab (the project stays on Home)").clicked() || resp.middle_clicked() {
+                    hide = Some(proj.path.clone());
+                }
                 if sel {
                     p.line_segment([egui::pos2(tr.left() + 8.0, bar.bottom() - 1.0), egui::pos2(tr.right() - 8.0, bar.bottom() - 1.0)], Stroke::new(2.0, ACCENT_HI));
                 }
@@ -111,7 +129,11 @@ impl App {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.button("Remove project (closes its sessions)").clicked() {
+                    if ui.button("Close tab (stays on Home)").clicked() {
+                        hide = Some(proj.path.clone());
+                        ui.close();
+                    }
+                    if ui.button("Remove project…").clicked() {
                         remove = Some(proj.path.clone());
                         ui.close();
                     }
@@ -177,7 +199,11 @@ impl App {
                             self.renaming_project = Some((p.clone(), name));
                             ui.close();
                         }
-                        if ui.button("Remove this project").clicked() {
+                        if ui.button("Close this tab (stays on Home)").clicked() {
+                            hide = Some(p.clone());
+                            ui.close();
+                        }
+                        if ui.button("Remove this project…").clicked() {
                             remove = Some(p);
                             ui.close();
                         }
@@ -188,8 +214,11 @@ impl App {
         if let Some(sel) = select {
             self.select_project(sel);
         }
+        if let Some(p) = hide {
+            self.hide_project_tab(&p);
+        }
         if let Some(p) = remove {
-            self.remove_project(&p);
+            self.confirm_remove_project = Some(p);
         }
         self.rename_project_dialog(&ctx);
     }
@@ -275,6 +304,9 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Scripts").on_hover_text("Run a script from the scripts folder in this project, as its own session (Ctrl+Shift+R)").clicked() {
+                    self.open_scripts();
+                }
                 if ui.button("Snippets").on_hover_text("Insert a saved prompt (Ctrl+Shift+S)").clicked() {
                     self.snippets_open = true;
                     self.snippet_focus = true;

@@ -2,6 +2,27 @@
 
 use super::*;
 
+/// One palette entry (snippets and scripts): bold name, a one-line monospace detail, and a
+/// faint note on the right.
+pub(super) fn palette_row(ui: &mut Ui, name: &str, detail: &str, note: &str) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, 5.0, CARD_HI);
+    }
+    p.text(egui::pos2(r.left() + 10.0, r.top() + 13.0), egui::Align2::LEFT_CENTER, name, egui::FontId::new(14.0, bold()), TEXT);
+    let mut job = egui::text::LayoutJob::simple_singleline(detail.to_string(), egui::FontId::monospace(12.0), TEXT_DIM);
+    job.wrap.max_width = r.width() - 110.0;
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let g = ui.fonts_mut(|f| f.layout_job(job));
+    p.galley(egui::pos2(r.left() + 10.0, r.top() + 24.0), g, TEXT_DIM);
+    if !note.is_empty() {
+        p.text(egui::pos2(r.right() - 10.0, r.center().y), egui::Align2::RIGHT_CENTER, note, egui::FontId::proportional(11.5), TEXT_FAINT);
+    }
+    resp
+}
+
 impl App {
     // ---------------------------------------------------------------------------------------
     // Snippets
@@ -59,23 +80,7 @@ impl App {
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                 for i in shown {
                     let sn = &self.s.snippets[i];
-                    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
-                    let p = ui.painter();
-                    if resp.hovered() {
-                        p.rect_filled(r, 5.0, CARD_HI);
-                    }
-                    p.text(egui::pos2(r.left() + 10.0, r.top() + 13.0), egui::Align2::LEFT_CENTER, &sn.name, egui::FontId::new(14.0, bold()), TEXT);
-                    let first = sn.text.lines().next().unwrap_or("");
-                    let mut job = egui::text::LayoutJob::simple_singleline(first.to_string(), egui::FontId::monospace(12.0), TEXT_DIM);
-                    job.wrap.max_width = r.width() - 110.0;
-                    job.wrap.max_rows = 1;
-                    job.wrap.break_anywhere = true;
-                    let g = ui.fonts_mut(|f| f.layout_job(job));
-                    p.galley(egui::pos2(r.left() + 10.0, r.top() + 24.0), g, TEXT_DIM);
-                    if sn.send {
-                        p.text(egui::pos2(r.right() - 10.0, r.center().y), egui::Align2::RIGHT_CENTER, "↵ sends", egui::FontId::proportional(11.5), TEXT_FAINT);
-                    }
-                    if resp.clicked() {
+                    if palette_row(ui, &sn.name, sn.text.lines().next().unwrap_or(""), if sn.send { "↵ sends" } else { "" }).clicked() {
                         pick = Some(i);
                     }
                 }

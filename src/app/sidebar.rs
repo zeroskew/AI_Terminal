@@ -92,10 +92,77 @@ impl App {
         self.s.projects.retain(|x| x.path != p);
         if self.s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false });
+            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true });
         }
         if self.s.selected_project.as_deref() == Some(p) {
             self.select_project(None);
+        }
+    }
+
+    /// Closes a project's tab: the project stays on Home (with its sessions, which keep
+    /// running); opening it again from Home brings the tab back.
+    pub(super) fn hide_project_tab(&mut self, p: &Path) {
+        if let Some(x) = self.s.projects.iter_mut().find(|x| x.path == p) {
+            x.in_tabs = false;
+        }
+        if self.s.selected_project.as_deref() == Some(p) {
+            self.select_project(None);
+        }
+    }
+
+    /// Confirmation for removing a project: what it does (and doesn't) before it happens.
+    pub(super) fn remove_project_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.confirm_remove_project.clone() else { return };
+        let Some(name) = self.s.projects.iter().find(|p| p.path == path).map(|p| p.name.clone()) else {
+            self.confirm_remove_project = None;
+            return;
+        };
+        let n = self.project_session_count(&path);
+        let running = self.project_sessions(&path).len();
+        let mut choice: Option<bool> = None;
+        let m = egui::Modal::new(egui::Id::unique("confirm_remove_project")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(20)).show(ctx, |ui| {
+            ui.set_width(520.0);
+            ui.label(RichText::new(format!("Remove \"{name}\" from AI Terminal?")).size(18.0).family(bold()).color(Color32::WHITE));
+            ui.add_space(2.0);
+            ui.label(RichText::new(path.display().to_string()).size(12.0).color(TEXT_FAINT));
+            ui.add_space(12.0);
+            let point = |ui: &mut Ui, head: &str, body: &str, col: Color32| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new("•").color(col));
+                    ui.label(RichText::new(head).family(bold()).color(col));
+                    ui.label(RichText::new(body).color(TEXT));
+                });
+                ui.add_space(4.0);
+            };
+            point(ui, "Removed:", "only this app's reference to the folder: its card on Home, its tab and its sessions list.", ORANGE);
+            if running > 0 {
+                point(ui, "Closed:", &format!("{running} running session{} in this project.", if running == 1 { "" } else { "s" }), ORANGE);
+            }
+            point(ui, "Not deleted:", "the folder and every file in it stay on disk, untouched.", GREEN);
+            if n > 0 {
+                point(ui, "Kept:", "Claude / Codex conversations stay in their own history; add the folder again and resume them with /resume.", GREEN);
+            }
+            ui.add_space(8.0);
+            ui.label(RichText::new("To just take it off the tab bar, untick \"Show in tabs\" instead.").color(TEXT_FAINT).size(12.5));
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("Remove").color(Color32::WHITE)).fill(RED).min_size(Vec2::new(80.0, 28.0))).clicked() {
+                    choice = Some(true);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(70.0, 28.0))).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if m.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        if let Some(ok) = choice {
+            self.confirm_remove_project = None;
+            if ok {
+                self.remove_project(&path);
+            }
         }
     }
 
