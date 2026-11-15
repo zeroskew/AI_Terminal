@@ -172,6 +172,8 @@ pub struct Settings {
     pub color_tags: bool,
     /// Tell Claude about the tags (`--append-system-prompt`) in sessions started here.
     pub color_tag_prompt: bool,
+    /// Ask new Claude sessions to name themselves after their first task (rename_session).
+    pub name_sessions: bool,
     // Options > General.
     pub launch_on_startup: bool,
     pub minimize_to_tray: bool,
@@ -225,6 +227,7 @@ impl Default for Settings {
             cli_history: Vec::new(),
             color_tags: true,
             color_tag_prompt: true,
+            name_sessions: true,
             launch_on_startup: false,
             minimize_to_tray: false,
             notifications: true,
@@ -422,6 +425,9 @@ impl App {
         if s.editor.is_empty() {
             s.editor = "auto".into();
         }
+        if s.version < 9 {
+            s.name_sessions = true;
+        }
         if s.version < 8 {
             s.notifications = true;
             s.notify_sound = true;
@@ -441,7 +447,7 @@ impl App {
             s.default_profile = crate::session::CLAUDE.into();
             s.version = 4;
         }
-        s.version = s.version.max(8);
+        s.version = s.version.max(9);
         // The registry is the truth for "launch on startup" (the user may have removed it).
         s.launch_on_startup = winsys::autostart_enabled();
         crate::dlog::ENABLED.store(s.debug_logging, std::sync::atomic::Ordering::Relaxed);
@@ -457,6 +463,7 @@ impl App {
             cc.egui_ctx.load_texture("app_logo", img, egui::TextureOptions::LINEAR)
         });
         agents::COLOR_TAG_PROMPT.store(s.color_tag_prompt && s.color_tags, std::sync::atomic::Ordering::Relaxed);
+        agents::NAME_SESSION_PROMPT.store(s.name_sessions, std::sync::atomic::Ordering::Relaxed);
         let applied = (s.code_font.clone(), s.ui_size);
         let mut app = App {
             s,
@@ -560,15 +567,16 @@ impl App {
         }
         let selected = selected.filter(|p| app.s.projects.iter().any(|x| &x.path == p)).or_else(|| app.s.projects.first().map(|p| p.path.clone()));
         app.select_project(selected);
-        // Test hooks: `--add-project <dir>` adds a project tab; `--start <profile>` starts a session; `--paste-image <file>` registers a file as pasted into the active session
+        // Test hooks: `--add-project <dir>` adds (and selects) a project tab; `--start <profile>` starts a session; `--paste-image <file>` registers a file as pasted into the active session
         // (as if pasted with Ctrl+V); `--type <text>` types a line into it.
         let args: Vec<String> = std::env::args().collect();
         for w in args.windows(2) {
             if w[0] == "--add-project" {
                 let dir = PathBuf::from(&w[1]);
                 if !app.s.projects.iter().any(|p| p.path == dir) {
-                    app.s.projects.push(Project { name: project_name(&dir), path: dir, collapsed: false });
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false });
                 }
+                app.s.selected_project = Some(dir);
             }
         }
         if args.iter().any(|a| a == "--launch-dialog") {
@@ -1156,6 +1164,7 @@ impl eframe::App for App {
         }
         self.cache.pump(&ctx);
         agents::COLOR_TAG_PROMPT.store(self.s.color_tag_prompt && self.s.color_tags, std::sync::atomic::Ordering::Relaxed);
+        agents::NAME_SESSION_PROMPT.store(self.s.name_sessions, std::sync::atomic::Ordering::Relaxed);
 
         // Terminal events (title, exit, OSC 52 clipboard) and activity marks.
         let active = self.active;

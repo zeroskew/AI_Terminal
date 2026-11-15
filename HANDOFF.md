@@ -29,15 +29,15 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 - `tools\hover.ps1 -ProcessId <pid> -X <x> -Y <y>` posts WM_MOUSEMOVE (physical client px)
   without moving the real cursor. It worked once for a path hover, but not reliably.
 - Test hooks (any order unless noted):
-  - `--add-project <dir>`
+  - `--add-project <dir>` (also selects it, so `--start` opens there)
   - `--start <Claude|Codex|pwsh|powershell|cmd>`
   - `--type "<line>"` and `--paste-image <file>` and `--find <text>`: run after `--start`
   - `--options`, `--options-page <general|images|snippets|shortcuts|about>`, `--launch-dialog`
   - `--plugins`, `--plugins-sources`, `--view-image <file>`
   - `--debug-log` (log goes to `%LOCALAPPDATA%\AI_Terminal\logs\ai_terminal.log`)
   - `--no-previews`, `--pin <n>`
-- Real Claude end-to-end runs (`--start Claude --type "..."`) work; Claude opens in the first
-  project (DeskLink in the test profile).
+- Real Claude end-to-end runs (`--start Claude --type "..."`) work; Claude opens in the selected
+  project; pass `--add-project` with an already-trusted folder, or Claude stops at its trust prompt.
 
 ## Architecture (src/)
 
@@ -64,7 +64,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 | `term_theme.rs`, `theme.rs`, `widgets.rs`, `titlebar.rs`, `dlog.rs` | Colours/presets, egui style, painted icons/buttons, dark DWM title bar, debug log |
 
 **App state and UI (`app.rs` + `app/`):**
-- `Settings` (persisted by eframe, `version` field for migrations, currently 8)
+- `Settings` (persisted by eframe, `version` field for migrations, currently 9)
 - projects, live `Tab`s and `Dormant` (listed, not running) sessions
 - top bar (project tabs, drag to reorder) and sidebar (sessions: day groups / pinned, live status, cost, rename, context menu)
 - new-session menu and launch dialog; Options window (General / Terminal / Images / Snippets / Shortcuts / About)
@@ -79,6 +79,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
   - **Unrestricted:** `--dangerously-skip-permissions`.
   - **With settings:** model, effort, CLI params with history, 1M context.
   - **Codex:** `--dangerously-bypass-approvals-and-sandbox`, `-c model_reasoning_effort=…`.
+- **Session names:** new, unnamed Claude sessions get an `--append-system-prompt` asking Claude to call `rename_session` after the first task (`agents::NAME_SESSION_TEXT`, Options > General > "Ask Claude to name new sessions…"). Not sent on resume.
 - **Conversation ids:** found by scanning for new transcripts after spawn (no `--session-id`); then kept current by the SessionStart hook (changes on `/clear`).
 - **Hook events and attention:** events go through files (no named pipe).
 - **Paste:** Explorer files → quoted paths; bitmap → PNG path; else text (bracketed when multi-line).

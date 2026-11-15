@@ -20,7 +20,8 @@ images inside the terminal**.
 
   Each Claude / Codex session is linked to its conversation (the transcript in
   `~/.claude/projects` or `~/.codex/sessions`) and named from it (Claude's title, else the first
-  prompt). Sessions stay in the list after a restart and **resume on click**
+  prompt). New Claude sessions are also asked to give themselves a short name after their first
+  task (Options > General > Sessions; nothing to set up per project). Sessions stay in the list after a restart and **resume on click**
   (`claude --resume <id>`, `codex resume <id>`) with the same settings; shells aren't kept.
   Right-click a session: Rename, Resume / Restart, Restart as Unrestricted / Restricted,
   Restart with settings…, Close. Double-click renames.
