@@ -816,9 +816,6 @@ impl App {
                     if ui.button(label).clicked() {
                         d.expanded = !d.expanded;
                     }
-                    if d.dirty() {
-                        widgets::pill(ui, if d.path.is_none() { "new" } else { "unsaved" }, Color32::WHITE, Color32::from_rgb(150, 80, 20));
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let del = if d.confirm_delete { egui::Button::new(RichText::new("Delete file?").color(Color32::WHITE)).fill(Color32::from_rgb(150, 40, 40)) } else { egui::Button::new("Delete") };
                         if ui.add(del).clicked() {
@@ -848,6 +845,10 @@ impl App {
                                 }
                             }
                             d.confirm_delete = false;
+                        }
+                        // In the right-to-left run (left of Save) so the buttons can't paint over it.
+                        if d.dirty() {
+                            widgets::pill(ui, if d.path.is_none() { "new" } else { "unsaved" }, Color32::WHITE, Color32::from_rgb(150, 80, 20));
                         }
                     });
                 });
