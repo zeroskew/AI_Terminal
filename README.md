@@ -1,6 +1,7 @@
 # AI Terminal
 
-A Windows terminal for AI CLI sessions (Claude Code, Codex, shells), with **previews of pasted
+A Windows terminal for AI CLI sessions (Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode,
+Kimi CLI, shells), with **previews of pasted
 images inside the terminal**.
 
 ## Features
@@ -20,6 +21,12 @@ images inside the terminal**.
     read from `claude --help`), CLI parameters with history, 1M context, unrestricted;
   - the same three for **Codex** when it's installed (`--dangerously-bypass-approvals-and-sandbox`,
     `--model`, `-c model_reasoning_effort=…`, models from `codex debug models`);
+    Codex is found on PATH, in its own install folder, or inside the Codex desktop app (Microsoft
+    Store), which ships the CLI;
+  - **Gemini**, **Qwen**, **OpenCode** and **Kimi** when their CLIs (`gemini`, `qwen`, `opencode`,
+    `kimi`) are installed: new session, unrestricted (`--yolo`; not OpenCode) and with settings (a
+    typed `--model`; OpenCode takes `provider/model`, e.g. `deepseek/deepseek-chat`). These run as
+    plain terminal sessions: no resume, transcript names or cost, and they aren't kept after a restart;
   - **New Shell (pwsh / powershell / cmd)**.
 
   Each Claude / Codex session is linked to its conversation (the transcript in
@@ -152,11 +159,21 @@ after saving.
   (output stays in the tab; Restart runs it again). The palette shows each script's first comment
   line. The folder is created on first use with a sample, "Commit and push": one small Claude Haiku
   call (`claude -p`, no tools, short system prompt, ~1.5k tokens) writes the message from the
-  diff, then it asks before committing and pushing.
+  diff, then it asks before committing and pushing. Options > Scripts (or "Edit scripts…" in the
+  palette) edits them in place: rename, Save, Revert, Delete, open in your editor, add new ones.
+  Or ask an agent to write one: **Copy prompt** there copies a starter request with the folder and
+  conventions filled in; paste it into a session and say what the script should do.
 - **Cost**: estimated cost and tokens per session from the transcript (Claude: per message,
   subagents included; Codex: token totals), in the list, the header (breakdown on hover) and the
   project tab tooltip. Prices: `assets\pricing.json`, overridable with
   `%APPDATA%\AI Terminal\pricing.json`.
+- **Model**: the header shows the model of the latest reply next to the agent ("Claude · Opus 5.5"),
+  so it stays visible after the startup banner has scrolled away and follows `/model` switches.
 - **Order**: drag project tabs to reorder them; right-click a session > Pin to top, and drag pinned
   sessions to order them.
+- **Archive**: each project lists its 20 most recently used sessions (Options > General > Sessions
+  > "Keep the last N sessions", 0 = all); older ones move to the collapsed **Archived** group at
+  the bottom of the list. Running and pinned sessions are never archived. Right-click a session >
+  Archive / Restore to list; click an archived one to resume it. The filter also searches the
+  archive.
 - **Idle**: the app doesn't redraw while nothing changes (0 CPU when idle).

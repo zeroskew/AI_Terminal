@@ -111,6 +111,8 @@ pub struct Tracker {
     codex_file: Option<PathBuf>,
     /// The latest request's prompt size (main conversation only, not subagents).
     context: u64,
+    /// The model of the latest reply in the main conversation (Codex: the current turn's).
+    model: String,
 }
 
 fn new_lines(path: &Path, offsets: &mut HashMap<PathBuf, u64>) -> Vec<String> {
@@ -190,6 +192,9 @@ impl Tracker {
                     if ctx > 0 {
                         self.context = ctx;
                     }
+                    if !model.is_empty() {
+                        self.model = model.clone();
+                    }
                 }
                 let e = self.by_msg.entry(key).or_insert((model, Usage::default()));
                 e.1 = e.1.max(usage);
@@ -208,6 +213,11 @@ impl Tracker {
         s
     }
 
+    /// The model currently answering (from the latest reply), if seen yet.
+    pub fn model(&self) -> Option<&str> {
+        Some(self.model.as_str()).filter(|m| !m.is_empty())
+    }
+
     /// Codex: the rollout's latest `total_token_usage` and model.
     pub fn update_codex(&mut self, id: &str) -> Summary {
         if self.codex_file.is_none() {
@@ -218,6 +228,7 @@ impl Tracker {
             if line.contains("\"turn_context\"") {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                     if let Some(m) = v["payload"]["model"].as_str() {
+                        self.model = m.to_string();
                         let u = self.codex.take().map(|c| c.1).unwrap_or_default();
                         self.codex = Some((m.to_string(), u));
                     }
@@ -247,6 +258,45 @@ impl Tracker {
     }
 }
 
+/// A short display name for a model id: "claude-opus-5-5" → "Opus 5.5",
+/// "claude-3-5-sonnet-20241022" → "Sonnet 3.5", "claude-sonnet-4-5[1m]" → "Sonnet 4.5 1M".
+/// "gpt-6-astra" → "GPT-6 Astra", "gpt-5.1-codex-max" → "GPT-5.1 Codex Max". Other ids as they are.
+pub fn model_label(id: &str) -> String {
+    let cap = |w: &str| {
+        let mut c = w.chars();
+        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    };
+    if let Some(rest) = id.strip_prefix("gpt-") {
+        let mut parts = rest.split('-');
+        let ver = parts.next().unwrap_or_default();
+        return std::iter::once(format!("GPT-{ver}")).chain(parts.filter(|p| !p.is_empty()).map(cap)).collect::<Vec<_>>().join(" ");
+    }
+    let Some(rest) = id.strip_prefix("claude-") else { return id.to_string() };
+    let (rest, ext) = match rest.find('[') {
+        Some(i) => (&rest[..i], rest[i..].trim_matches(|c| c == '[' || c == ']').to_uppercase()),
+        None => (rest, String::new()),
+    };
+    let (mut words, mut nums) = (Vec::new(), Vec::new());
+    for part in rest.split('-') {
+        if part.is_empty() || (part.len() >= 8 && part.chars().all(|c| c.is_ascii_digit())) {
+            continue; // date stamp
+        }
+        if part.chars().all(|c| c.is_ascii_digit()) {
+            nums.push(part);
+        } else {
+            words.push(cap(part));
+        }
+    }
+    let mut out = words.join(" ");
+    if !nums.is_empty() {
+        out = format!("{out} {}", nums.join("."));
+    }
+    if !ext.is_empty() {
+        out = format!("{out} {ext}");
+    }
+    if out.trim().is_empty() { id.to_string() } else { out.trim().to_string() }
+}
+
 /// "$1.23" / "$0.042" / "<$0.01".
 pub fn fmt_usd(v: f64) -> String {
     if v <= 0.0 {
@@ -272,6 +322,18 @@ pub fn fmt_tokens(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_labels() {
+        assert_eq!(super::model_label("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(super::model_label("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
+        assert_eq!(super::model_label("claude-opus-4-1-20250805"), "Opus 4.1");
+        assert_eq!(super::model_label("claude-sonnet-4-5[1m]"), "Sonnet 4.5 1M");
+        assert_eq!(super::model_label("claude-haiku-5-5"), "Haiku 5.5");
+        assert_eq!(super::model_label("gpt-6-astra"), "GPT-6 Astra");
+        assert_eq!(super::model_label("gpt-5.1-codex-max"), "GPT-5.1 Codex Max");
+        assert_eq!(super::model_label("o3"), "o3");
+    }
 
     #[test]
     fn model_ids_resolve_like_tt() {

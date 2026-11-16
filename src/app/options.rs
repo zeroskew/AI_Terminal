@@ -97,7 +97,7 @@ impl App {
                         ui.label(RichText::new("OPTIONS").size(11.5).family(bold()).color(TEXT_DIM));
                     });
                     ui.add_space(14.0);
-                    for (p, label) in [(OptPage::General, "General"), (OptPage::Terminal, "Terminal"), (OptPage::Images, "Images"), (OptPage::Snippets, "Snippets"), (OptPage::Shortcuts, "Shortcuts"), (OptPage::About, "About")] {
+                    for (p, label) in [(OptPage::General, "General"), (OptPage::Terminal, "Terminal"), (OptPage::Images, "Images"), (OptPage::Snippets, "Snippets"), (OptPage::Scripts, "Scripts"), (OptPage::Shortcuts, "Shortcuts"), (OptPage::About, "About")] {
                         let sel = page_now == p;
                         let (r, resp) = ui.allocate_exact_size(Vec2::new(190.0, 34.0), Sense::click());
                         let painter = ui.painter();
@@ -132,6 +132,7 @@ impl App {
                                 OptPage::General => self.options_general(ui),
                                 OptPage::Shortcuts => self.options_shortcuts(ui),
                                 OptPage::Snippets => self.options_snippets(ui),
+                                OptPage::Scripts => self.options_scripts(ui),
                                 OptPage::About => self.options_about(ui),
                             }
                         });
@@ -143,6 +144,10 @@ impl App {
             close = true;
         }
         self.options = if close { None } else { Some(page_now) };
+        if self.options != Some(OptPage::Scripts) {
+            // Reload from disk next time the page is shown.
+            self.scripts_synced = false;
+        }
         if close {
             self.focus_terminal = true;
         }
@@ -158,7 +163,15 @@ impl App {
 
     pub(super) fn opt_heading(ui: &mut Ui, text: &str) {
         ui.add_space(14.0);
-        ui.label(RichText::new(text).size(11.5).family(bold()).color(TEXT_DIM));
+        ui.horizontal(|ui| {
+            let r = ui.label(RichText::new(text).size(11.5).family(bold()).color(TEXT_DIM)).rect;
+            // A hairline from just after the heading to the right edge separates the sections.
+            let x0 = r.right() + 8.0;
+            let x1 = ui.max_rect().right();
+            if x1 > x0 {
+                ui.painter().hline(x0..=x1, r.center().y.round() + 0.5, Stroke::new(1.0, BORDER));
+            }
+        });
         ui.add_space(2.0);
     }
 
@@ -485,8 +498,16 @@ impl App {
             });
         });
         ui.checkbox(&mut self.s.reopen_sessions, "Keep sessions in the list after restart (resume on click)");
-        ui.checkbox(&mut self.s.name_sessions, "Ask Claude to name new sessions after their first task");
-        ui.label(RichText::new("Sent with each new Claude session (--append-system-prompt); Claude renames the session through AI Terminal's rename_session tool. Not used when you name the session at launch.").size(12.0).color(TEXT_FAINT));
+        ui.horizontal(|ui| {
+            ui.label("Keep the last");
+            ui.add(egui::DragValue::new(&mut self.s.keep_sessions).range(0..=500).speed(0.2));
+            ui.label("sessions per project in the list");
+        });
+        ui.label(RichText::new("Older ones move to the Archived group at the bottom of the list (still resumable; right-click > Restore to list brings one back). Running and pinned sessions are never archived. 0 = keep all.").size(12.0).color(TEXT_FAINT));
+        ui.checkbox(&mut self.s.active_on_top, "Move running sessions to the top of the list");
+        ui.label(RichText::new("They show in an Active group below Pinned; a session drops back to its day once it's closed or exits.").size(12.0).color(TEXT_FAINT));
+        ui.checkbox(&mut self.s.name_sessions, "Ask agents to name new sessions after their first task");
+        ui.label(RichText::new("Sent as an instruction with each new session of an agent that supports it (currently Claude and Codex); the agent renames the session through AI Terminal's rename_session tool. Not used when you name the session at launch.").size(12.0).color(TEXT_FAINT));
         ui.checkbox(&mut self.s.shift_enter_alt, "Shift+Enter inserts a newline (sends ESC+CR, for Claude Code)");
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.s.show_cost, "Show session usage as");

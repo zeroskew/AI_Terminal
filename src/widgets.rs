@@ -22,6 +22,8 @@ pub enum Icon {
     Prompt,
     /// Plugins: a puzzle piece.
     Plugin,
+    /// Other agent CLIs: a four-point star.
+    Star,
 }
 
 pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) {
@@ -95,6 +97,18 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             // Knobs on the top and right edges.
             p.circle_stroke(Pos2::new(r.center().x, r.top() - h * 0.18), h * 0.22, st);
             p.circle_stroke(Pos2::new(r.right() + h * 0.18, r.center().y), h * 0.22, st);
+        }
+        Icon::Star => {
+            let mut pts = Vec::new();
+            for i in 0..8 {
+                let t = i as f32 / 8.0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                let r = if i % 2 == 0 { h * 0.95 } else { h * 0.28 };
+                pts.push(Pos2::new(c.x + r * t.cos(), c.y + r * t.sin()));
+            }
+            // Concave: four convex quads around the centre.
+            for i in 0..4 {
+                p.add(Shape::convex_polygon(vec![c, pts[(i * 2 + 7) % 8], pts[i * 2], pts[i * 2 + 1]], col, Stroke::NONE));
+            }
         }
         Icon::ChevronDown => {
             p.add(Shape::convex_polygon(vec![Pos2::new(c.x - h * 0.55, c.y - h * 0.3), Pos2::new(c.x + h * 0.55, c.y - h * 0.3), Pos2::new(c.x, c.y + h * 0.35)], col, Stroke::NONE));

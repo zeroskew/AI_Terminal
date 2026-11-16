@@ -238,20 +238,33 @@ impl App {
         let cost_pill = tab.sess.cost.filter(|_| self.s.show_cost);
         let plan_pill = if self.s.usage_as == "plan" { Some(tab.sess.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).copied()) } else { None };
         let attention_pill = tab.sess.attention.clone();
-        let model_pill = tab.sess.opts.model.clone().map(|m| match &tab.sess.opts.effort {
-            Some(e) => format!("{m} · {e}"),
-            None => m,
-        });
+        // The model actually answering (from the transcript) goes in the profile pill; the
+        // launch options pill then only adds the effort.
+        let live_model = tab.sess.model.clone();
+        let model_pill = if live_model.is_some() {
+            tab.sess.opts.effort.clone().map(|e| format!("effort {e}"))
+        } else {
+            tab.sess.opts.model.clone().map(|m| match &tab.sess.opts.effort {
+                Some(e) => format!("{m} · {e}"),
+                None => m,
+            })
+        };
         let ctx = ui.ctx().clone();
         let mut open: Option<PathBuf> = None;
         let mut restart = false;
         let mut compact = false;
+        let mut change_model = false;
         let can_compact = exited.is_none() && tab.sess.profile.kind == Kind::Claude;
         ui.horizontal_centered(|ui| {
             let name_for_pill = name.clone();
             ui.label(RichText::new(name).family(bold()).size(14.0).color(TEXT));
-            if profile != name_for_pill {
+            if let Some(m) = &live_model {
+                widgets::pill(ui, &format!("{profile} · {}", crate::cost::model_label(m)), TEXT_DIM, CARD_HI).on_hover_text(format!("Model of the latest reply: {m}"));
+            } else if profile != name_for_pill {
                 widgets::pill(ui, &profile, TEXT_DIM, CARD_HI);
+            }
+            if can_compact && super::status_bar::link_button(ui, "change", "Switch this session to another model (sends /model)") {
+                change_model = true;
             }
             if busy_pill {
                 widgets::pill(ui, "working…", Color32::WHITE, Color32::from_rgb(28, 92, 160));
@@ -352,6 +365,9 @@ impl App {
         }
         if compact {
             self.send_command_to(id, "/compact");
+        }
+        if change_model {
+            self.model_switch = Some(id);
         }
     }
 }
