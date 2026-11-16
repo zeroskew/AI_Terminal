@@ -106,9 +106,78 @@ pub fn open_file(path: &Path, line: Option<u32>, col: Option<u32>, editor: &str,
     }
 }
 
+/// The GitHub page of the git repository containing `dir` (its `origin` remote, else the first
+/// remote on github.com); None when it isn't a git repository or isn't on GitHub. Reads the git
+/// config directly (no git process), following worktree / submodule `.git` files.
+pub fn github_page(dir: &Path) -> Option<String> {
+    let git_dir = dir.ancestors().find_map(|d| {
+        let g = d.join(".git");
+        if g.is_dir() {
+            return Some(g);
+        }
+        // Worktrees and submodules: a `.git` file with "gitdir: <path>".
+        let text = std::fs::read_to_string(&g).ok()?;
+        let p = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
+        Some(if p.is_absolute() { p } else { d.join(p) })
+    })?;
+    // A worktree's config lives in the main repository (its `commondir`).
+    let common = std::fs::read_to_string(git_dir.join("commondir")).ok().map(|c| {
+        let p = PathBuf::from(c.trim());
+        if p.is_absolute() { p } else { git_dir.join(p) }
+    });
+    let config = std::fs::read_to_string(common.unwrap_or(git_dir).join("config")).ok()?;
+    let remotes = remote_urls(&config);
+    remotes.iter().find(|(n, _)| n == "origin").into_iter().chain(remotes.iter()).find_map(|(_, u)| github_web_url(u))
+}
+
+/// (remote name, url) pairs from a git config file.
+fn remote_urls(config: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut remote: Option<String> = None;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            remote = line.strip_prefix("[remote \"").and_then(|r| r.strip_suffix("\"]")).map(str::to_string);
+        } else if let (Some(name), Some((k, v))) = (&remote, line.split_once('=')) {
+            if k.trim().eq_ignore_ascii_case("url") {
+                out.push((name.clone(), v.trim().trim_matches('"').to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// https://github.com/owner/repo for a GitHub remote URL (https, ssh or scp-style).
+fn github_web_url(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("git@github.com:").or_else(|| {
+        let after_scheme = url.split_once("://")?.1;
+        let host_path = after_scheme.rsplit_once('@').map_or(after_scheme, |(_, h)| h);
+        let (host, path) = host_path.split_once('/')?;
+        // Host may carry a port (ssh://git@github.com:22/...).
+        host.split(':').next()?.eq_ignore_ascii_case("github.com").then_some(path)
+    })?;
+    let path = rest.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/').filter(|s| !s.is_empty());
+    let (owner, repo) = (parts.next()?, parts.next()?);
+    Some(format!("https://github.com/{owner}/{repo}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_urls() {
+        for u in ["https://github.com/a/b.git", "https://github.com/a/b", "git@github.com:a/b.git", "ssh://git@github.com/a/b.git", "ssh://git@github.com:22/a/b", "https://user:tok@github.com/a/b/"] {
+            assert_eq!(github_web_url(u).as_deref(), Some("https://github.com/a/b"), "{u}");
+        }
+        assert_eq!(github_web_url("https://gitlab.com/a/b.git"), None);
+        assert_eq!(github_web_url("git@example.com:a/b.git"), None);
+        let cfg = "[core]\n\tbare = false\n[remote \"upstream\"]\n\turl = https://github.com/up/x.git\n[remote \"origin\"]\n\turl = git@github.com:me/x.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n";
+        let r = remote_urls(cfg);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.iter().find(|(n, _)| n == "origin").and_then(|(_, u)| github_web_url(u)).as_deref(), Some("https://github.com/me/x"));
+    }
 
     #[test]
     fn urls() {

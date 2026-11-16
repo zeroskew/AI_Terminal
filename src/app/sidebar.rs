@@ -13,6 +13,52 @@ impl App {
         self.project_sessions(p).len() + self.dormant.iter().filter(|d| d.saved.project == p && !d.saved.archived).count()
     }
 
+    /// Lists the Claude conversations found by the start-up scan that aren't listed yet (each
+    /// under the project of the folder it ran in; a new folder becomes a project on Home, not a
+    /// tab). Older ones then go to Archived per "keep the last N".
+    pub(super) fn merge_found_claude(&mut self) {
+        let Some(found) = self.found_claude.lock().unwrap().take() else { return };
+        let Some(profile) = self.profiles.iter().find(|p| p.kind == Kind::Claude).cloned() else { return };
+        let mut known: std::collections::HashSet<String> =
+            self.tabs.iter().filter_map(|t| t.sess.agent_id.clone()).chain(self.dormant.iter().filter_map(|d| d.saved.agent_id.clone())).collect();
+        let norm = |p: &Path| p.display().to_string().to_lowercase().trim_end_matches('\\').to_string();
+        let mut added = 0;
+        for f in found {
+            if !known.insert(f.id.clone()) {
+                continue;
+            }
+            let key = norm(&f.cwd);
+            let project = match self.s.projects.iter().find(|p| norm(&p.path) == key) {
+                Some(p) => p.path.clone(),
+                None => {
+                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false });
+                    f.cwd.clone()
+                }
+            };
+            let saved = SavedSession {
+                project,
+                profile: profile.clone(),
+                name: String::new(),
+                created: f.created,
+                title: f.title,
+                agent_id: Some(f.id),
+                opts: Default::default(),
+                cost: None,
+                pin: 0,
+                archived: false,
+                used: f.used,
+            };
+            let id = self.next_id;
+            self.next_id += 1;
+            self.dormant.push(Dormant { id, saved });
+            added += 1;
+        }
+        if added > 0 {
+            crate::dlog!("listed {added} Claude conversation(s) from other apps");
+            self.auto_archive();
+        }
+    }
+
     /// "Keep the last N sessions": per project, listed sessions past the N most recently used
     /// move to Archived. Running and pinned sessions are never archived (running ones count
     /// towards N).

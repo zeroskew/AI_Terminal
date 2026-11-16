@@ -229,6 +229,19 @@ impl App {
     }
 
     /// Header above the terminal: session name, shell, folder, and the pasted images strip.
+    /// The project's GitHub page, re-read from its git config at most every 10 s.
+    fn github_page(&mut self, project: &Path) -> Option<String> {
+        let now = std::time::Instant::now();
+        match self.github_pages.get(project) {
+            Some((at, url)) if now.duration_since(*at) < Duration::from_secs(10) => url.clone(),
+            _ => {
+                let url = crate::links::github_page(project);
+                self.github_pages.insert(project.to_path_buf(), (now, url.clone()));
+                url
+            }
+        }
+    }
+
     pub(super) fn header(&mut self, ui: &mut Ui) {
         let Some(tab) = self.active_tab() else { return };
         let name = tab.sess.display_name();
@@ -243,6 +256,7 @@ impl App {
         let cost_pill = tab.sess.cost.filter(|_| self.s.show_cost);
         let plan_pill = if self.s.usage_as == "plan" { Some(tab.sess.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).copied()) } else { None };
         let attention_pill = tab.sess.attention.clone();
+        let project = tab.project.clone();
         // One pill: profile · model (the one actually answering, from the transcript, else the
         // launch model) · effort. Clicking it opens the model / effort picker.
         let live_model = tab.sess.model.clone();
@@ -279,6 +293,7 @@ impl App {
         // Claude and Codex both have /model and /compact.
         let is_codex = tab.sess.profile.kind == Kind::Codex;
         let can_compact = exited.is_none() && (tab.sess.profile.kind == Kind::Claude || is_codex);
+        let github = if self.s.show_github_button { self.github_page(&project) } else { None };
         ui.horizontal_centered(|ui| {
             ui.label(RichText::new(name).family(bold()).size(14.0).color(TEXT));
             if !model_pill.is_empty() {
@@ -321,17 +336,28 @@ impl App {
                     None => (format!("{} · ", crate::cost::fmt_usd(c.usd)), "Estimated from the transcript at API prices".to_string()),
                 };
                 let ctx = if c.context > 0 { format!("context {} · ", crate::cost::fmt_tokens(c.context)) } else { String::new() };
-                widgets::pill(ui, &format!("{ctx}{head}{} tokens", crate::cost::fmt_tokens(u.total())), TEXT_DIM, CARD_HI).on_hover_text(format!(
-                    "Context: {} tokens sent with every request (system prompt, tools, memory and the conversation so far), from the latest request. Run /compact to shrink it.\n\n{about}\nInput {}  ·  output {}\nCache read {}  ·  cache write {}{}",
+                let clickable = can_compact && c.context > 0;
+                let tip = format!(
+                    "Context: {} tokens sent with every request (system prompt, tools, memory and the conversation so far), from the latest request.\n\n{about}\nInput {}  ·  output {}\nCache read {}  ·  cache write {}{}{}",
                     crate::cost::fmt_tokens(c.context),
                     crate::cost::fmt_tokens(u.input),
                     crate::cost::fmt_tokens(u.output),
                     crate::cost::fmt_tokens(u.cache_read),
                     crate::cost::fmt_tokens(u.cache_write),
-                    if u.web_searches > 0 { format!("\nWeb searches {}", u.web_searches) } else { String::new() }
-                ));
-                if can_compact && c.context > 0 && super::status_bar::link_button(ui, "compact", "Run /compact: replace the conversation so far with a summary, so each request sends less context") {
-                    compact = true;
+                    if u.web_searches > 0 { format!("\nWeb searches {}", u.web_searches) } else { String::new() },
+                    if clickable { "\n\nClick to run /compact: replace the conversation so far with a summary, so each request sends less context." } else { "" }
+                );
+                let pill = widgets::pill(ui, &format!("{ctx}{head}{} tokens", crate::cost::fmt_tokens(u.total())), TEXT_DIM, CARD_HI);
+                if clickable {
+                    let resp = ui.interact(pill.rect, ui.auto_id_with("context_pill"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.hovered() {
+                        ui.painter().rect_stroke(pill.rect, pill.rect.height() / 2.0, Stroke::new(1.0, LINK), egui::StrokeKind::Inside);
+                    }
+                    if resp.on_hover_text(tip).clicked() {
+                        compact = true;
+                    }
+                } else {
+                    pill.on_hover_text(tip);
                 }
             }
             if unrestricted_pill {
@@ -346,6 +372,11 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(url) = &github {
+                    if widgets::icon_button(ui, Icon::GitHub, 26.0, TEXT_DIM, &format!("Open on GitHub: {url}")).clicked() {
+                        crate::links::open_url(url);
+                    }
+                }
                 if ui.button("Scripts").on_hover_text("Run a script from the scripts folder in this project, as its own session (Ctrl+Shift+R)").clicked() {
                     self.open_scripts();
                 }

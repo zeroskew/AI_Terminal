@@ -159,6 +159,44 @@ impl App {
         }
     }
 
+    /// Changes made in the Options window are written to disk right away (instead of at the next
+    /// periodic save), once they settle, with a short "Settings saved" toast.
+    pub(super) fn options_autosave(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.options.is_none() && self.opts_changed_at.is_none() {
+            self.opts_snapshot = None;
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        // The session list isn't edited here (and is rewritten by every save): leave it out.
+        let sessions = std::mem::take(&mut self.s.sessions);
+        let snap = serde_json::to_string(&self.s).unwrap_or_default();
+        self.s.sessions = sessions;
+        match &self.opts_snapshot {
+            None => self.opts_snapshot = Some(snap),
+            Some(old) if *old != snap => {
+                self.opts_snapshot = Some(snap);
+                self.opts_changed_at = Some(now);
+            }
+            _ => {}
+        }
+        let Some(changed) = self.opts_changed_at else { return };
+        // Wait until a slider drag or a burst of typing is over (or the window closes).
+        let settled = now - changed > 0.8 && !ctx.input(|i| i.pointer.any_down());
+        if !settled && self.options.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+            return;
+        }
+        self.opts_changed_at = None;
+        if self.options.is_none() {
+            self.opts_snapshot = None;
+        }
+        if let Some(storage) = frame.storage_mut() {
+            eframe::App::save(self, storage);
+            storage.flush();
+            self.toast = Some(("Settings saved".into(), GREEN, now + 1.5));
+        }
+    }
+
     /// Fixed-width, left-aligned label in front of an option.
     pub(super) fn opt_label(ui: &mut Ui, text: &str) {
         ui.allocate_ui_with_layout(Vec2::new(150.0, 26.0), Layout::left_to_right(Align::Center), |ui| {
@@ -420,14 +458,25 @@ impl App {
             match winsys::set_autostart(startup) {
                 Ok(()) => {
                     self.s.launch_on_startup = startup;
-                    if startup && !self.s.minimize_to_tray {
+                    if startup && !self.s.minimize_to_tray && self.s.close_action != "tray" {
                         self.s.minimize_to_tray = true;
                     }
                 }
                 Err(e) => self.toast(e, RED, &ui.ctx().clone()),
             }
         }
-        Self::opt_check(ui, &mut self.s.minimize_to_tray, "Minimize to system tray", "When minimizing or closing the window, hide it to the system tray and keep sessions running. Quit from the tray icon's menu.");
+        Self::opt_check(ui, &mut self.s.minimize_to_tray, "Minimize to system tray", "When minimizing the window, hide it to the system tray and keep sessions running.");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("When I close the app").size(14.5).color(TEXT));
+            for (v, label) in [("exit", "Exit it"), ("minimize", "Minimize it"), ("tray", "Hide to system tray")] {
+                ui.radio_value(&mut self.s.close_action, v.to_string(), label);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(28.0);
+            ui.label(RichText::new("Minimize and system tray keep sessions running. To really quit, use Quit from the tray icon's menu.").size(12.5).color(TEXT_DIM));
+        });
+        ui.add_space(4.0);
 
         Self::opt_heading(ui, "UPDATES");
         Self::opt_check(ui, &mut self.s.auto_update, "Update automatically", "Check GitHub for a new release, download it in the background, and install it when AI Terminal restarts.");
@@ -513,6 +562,7 @@ impl App {
 
         Self::opt_heading(ui, "LINKS");
         ui.label(RichText::new("Hold Ctrl over a URL or a file path (with :line) in the terminal and click to open it.").size(12.5).color(TEXT_DIM));
+        ui.checkbox(&mut self.s.show_github_button, "GitHub button in the session header (when the project's git remote is on GitHub)");
         ui.horizontal(|ui| {
             ui.label("Open files with");
             let cur = crate::links::EDITORS.iter().find(|e| e.0 == self.s.editor).map(|e| e.1).unwrap_or("Automatic");
@@ -540,6 +590,8 @@ impl App {
             });
         });
         ui.checkbox(&mut self.s.reopen_sessions, "Keep sessions in the list after restart (resume on click)");
+        ui.add_enabled(self.s.reopen_sessions, egui::Checkbox::new(&mut self.s.import_claude_sessions, "List Claude sessions started in other apps (checked at start-up)"));
+        ui.label(RichText::new("Conversations from the Claude CLI, Claude's desktop app or other terminals (~\\.claude\\projects) are added to their folder's project; new folders are added as projects on Home.").size(12.0).color(TEXT_FAINT));
         ui.horizontal(|ui| {
             ui.label("Keep the last");
             ui.add(egui::DragValue::new(&mut self.s.keep_sessions).range(0..=500).speed(0.2));

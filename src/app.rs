@@ -218,7 +218,12 @@ pub struct Settings {
     pub projects: Vec<Project>,
     pub sessions: Vec<SavedSession>,
     pub reopen_sessions: bool,
+    /// At start-up, list Claude conversations started elsewhere (the CLI, Claude's desktop app,
+    /// other terminals) so they can be resumed here; their folders are added as projects.
+    pub import_claude_sessions: bool,
     pub selected_project: Option<PathBuf>,
+    /// The last project tab selected (kept while Home is showing); start-up reopens it.
+    pub last_project: Option<PathBuf>,
     pub default_profile: String,
     /// Which row of that profile is the default: "" (plain), "unrestricted" or "settings".
     pub default_variant: String,
@@ -232,6 +237,8 @@ pub struct Settings {
     pub preview_over_text: bool,
     pub shift_enter_alt: bool,
     pub show_image_strip: bool,
+    /// A GitHub button in the session header when the project's git remote is on GitHub.
+    pub show_github_button: bool,
     /// Paste folder limits: days to keep pasted images and folder size in MB (0 = unlimited).
     pub paste_keep_days: u32,
     pub paste_max_mb: u32,
@@ -250,6 +257,9 @@ pub struct Settings {
     // Options > General.
     pub launch_on_startup: bool,
     pub minimize_to_tray: bool,
+    /// What closing the window does: "exit", "minimize" (to the taskbar) or "tray" (hide it;
+    /// the tray icon brings it back). Quit from the tray always exits.
+    pub close_action: String,
     pub notifications: bool,
     pub notify_sound: bool,
     pub flash_taskbar: bool,
@@ -312,7 +322,9 @@ impl Default for Settings {
             projects: Vec::new(),
             sessions: Vec::new(),
             reopen_sessions: true,
+            import_claude_sessions: true,
             selected_project: None,
+            last_project: None,
             default_profile: crate::session::CLAUDE.into(),
             default_variant: String::new(),
             font_size: 15.0,
@@ -324,6 +336,7 @@ impl Default for Settings {
             preview_over_text: false,
             shift_enter_alt: true,
             show_image_strip: true,
+            show_github_button: true,
             paste_keep_days: 30,
             paste_max_mb: 1024,
             term_theme: Default::default(),
@@ -336,6 +349,7 @@ impl Default for Settings {
             name_sessions: true,
             launch_on_startup: false,
             minimize_to_tray: false,
+            close_action: "exit".into(),
             notifications: true,
             notify_sound: true,
             flash_taskbar: false,
@@ -359,7 +373,7 @@ impl Default for Settings {
             search_days: 0,
             auto_update: true,
             update_on_startup: true,
-            update_periodic: true,
+            update_periodic: false,
             update_interval_min: 480,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
@@ -498,6 +512,8 @@ pub struct App {
     /// ever losing focus, so Enter / clicking away never finished the rename).
     rename_focus: bool,
     renaming_project: Option<(PathBuf, String)>,
+    /// Each project's GitHub page (None = not on GitHub), with when it was read from the git config.
+    github_pages: std::collections::HashMap<PathBuf, (std::time::Instant, Option<String>)>,
     /// The session last shown in each project (restored when its tab is selected again).
     remembered: std::collections::HashMap<PathBuf, u64>,
     filter: String,
@@ -575,6 +591,9 @@ pub struct App {
     catalog: std::sync::Arc<std::sync::Mutex<Option<agents::Catalog>>>,
     /// A model refresh is running.
     catalog_loading: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Claude conversations from other apps, scanned in the background at start-up and merged
+    /// into the list once ready.
+    found_claude: std::sync::Arc<std::sync::Mutex<Option<Vec<agents::FoundClaude>>>>,
     /// Hex fields being edited in Options (keyed by colour name).
     hex_edit: std::collections::HashMap<String, String>,
     /// The sidebar's Archived group is expanded.
@@ -587,6 +606,10 @@ pub struct App {
     update_dialog: bool,
     /// The update whose "downloaded" toast was shown (once per tag).
     update_announced: Option<String>,
+    /// While the Options window is open: the settings as last seen (sessions left out), and when
+    /// they last changed (not yet saved).
+    opts_snapshot: Option<String>,
+    opts_changed_at: Option<f64>,
 }
 
 fn project_name(p: &Path) -> String {
@@ -601,6 +624,13 @@ impl App {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if s.editor.is_empty() {
             s.editor = "auto".into();
+        }
+        if s.version < 10 {
+            // Closing used to follow "minimize to tray".
+            s.close_action = if s.minimize_to_tray { "tray" } else { "exit" }.into();
+        }
+        if !matches!(s.close_action.as_str(), "exit" | "minimize" | "tray") {
+            s.close_action = "exit".into();
         }
         if s.version < 9 {
             s.name_sessions = true;
@@ -624,7 +654,7 @@ impl App {
             s.default_profile = crate::session::CLAUDE.into();
             s.version = 4;
         }
-        s.version = s.version.max(9);
+        s.version = s.version.max(10);
         // The registry is the truth for "launch on startup" (the user may have removed it).
         s.launch_on_startup = winsys::autostart_enabled();
         crate::dlog::ENABLED.store(s.debug_logging, std::sync::atomic::Ordering::Relaxed);
@@ -655,6 +685,7 @@ impl App {
             renaming: None,
             rename_focus: false,
             renaming_project: None,
+            github_pages: Default::default(),
             remembered: Default::default(),
             filter: String::new(),
             toast: None,
@@ -707,12 +738,15 @@ impl App {
             launch: None,
             catalog: Default::default(),
             catalog_loading: Default::default(),
+            found_claude: Default::default(),
             hex_edit: Default::default(),
             show_archived: false,
             open_new_menu: std::env::args().any(|a| a == "--new-menu"),
             search_ui: None,
             update_dialog: std::env::args().any(|a| a == "--check-updates"),
             update_announced: None,
+            opts_snapshot: None,
+            opts_changed_at: None,
         };
         let ctx = cc.egui_ctx.clone();
         // MCP server for the sessions (tools to work with AI Terminal itself).
@@ -729,7 +763,7 @@ impl App {
             Err(e) => crate::dlog!("mcp server failed: {e}"),
         }
         app.refresh_catalog(&ctx);
-        let selected = app.s.selected_project.clone();
+        let selected = app.s.selected_project.clone().or_else(|| app.s.last_project.clone());
         // Nothing starts by itself: sessions from last time are listed and resume when clicked.
         let saved = if app.s.reopen_sessions { std::mem::take(&mut app.s.sessions) } else { Vec::new() };
         for mut ss in saved {
@@ -763,7 +797,18 @@ impl App {
                 app.dormant.push(Dormant { id, saved: ss });
             }
         }
-        let selected = selected.filter(|p| app.s.projects.iter().any(|x| &x.path == p)).or_else(|| app.s.projects.first().map(|p| p.path.clone()));
+        if app.s.reopen_sessions && app.s.import_claude_sessions {
+            // Only transcripts that existed before now: newer ones belong to sessions starting here.
+            let (found, ctx, before) = (app.found_claude.clone(), ctx.clone(), std::time::SystemTime::now());
+            std::thread::spawn(move || {
+                let list = agents::scan_claude_conversations(before);
+                *found.lock().unwrap() = Some(list);
+                ctx.request_repaint();
+            });
+        }
+        // Fall back to the first project still shown as a tab (or Home): selecting a project
+        // re-shows its tab, so falling back to a hidden one would undo the user's closing it.
+        let selected = selected.filter(|p| app.s.projects.iter().any(|x| &x.path == p && x.in_tabs)).or_else(|| app.tab_projects().into_iter().next());
         app.select_project(selected);
         // Test hooks: `--add-project <dir>` adds (and selects) a project tab; `--start <profile>` starts a session; `--paste-image <file>` registers a file as pasted into the active session
         // (as if pasted with Ctrl+V); `--type <text>` types a line into it.
@@ -905,6 +950,9 @@ impl App {
             let ids = self.project_sessions(p);
             self.remembered.get(p).copied().filter(|id| ids.contains(id)).or(ids.first().copied())
         });
+        if p.is_some() {
+            self.s.last_project = p.clone();
+        }
         self.s.selected_project = p;
         self.filter.clear();
         self.focus_terminal = true;
@@ -914,6 +962,7 @@ impl App {
         if let Some(t) = self.tabs.iter().find(|t| t.sess.id == id) {
             self.remembered.insert(t.project.clone(), id);
             self.s.selected_project = Some(t.project.clone());
+            self.s.last_project = Some(t.project.clone());
             self.active = Some(id);
             self.focus_terminal = true;
         }
@@ -1210,32 +1259,37 @@ impl App {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true)) && winsys::is_main_visible();
         self.auto_archive();
 
-        // Tray: needed for minimize-to-tray and for notifications.
-        if self.s.minimize_to_tray || self.s.notifications {
+        // Tray: needed for minimize / close to tray and for notifications.
+        let tray_window = self.s.minimize_to_tray || self.s.close_action == "tray";
+        if tray_window || self.s.notifications {
             winsys::tray_show(ctx);
         } else {
             winsys::tray_hide();
         }
         // Started at sign-in (--minimized): into the tray, or just minimized without it.
         if std::mem::take(&mut self.start_hidden) {
-            if self.s.minimize_to_tray {
+            if tray_window {
                 winsys::hide_main();
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
         }
-        if self.s.minimize_to_tray && !winsys::QUITTING.load(std::sync::atomic::Ordering::Relaxed) {
-            if ctx.input(|i| i.viewport().close_requested()) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        let quitting = winsys::QUITTING.load(std::sync::atomic::Ordering::Relaxed);
+        // Closing the window: exit, minimize, or hide to the tray (Quit from the tray really exits).
+        let close_exits = quitting || self.s.close_action == "exit";
+        if !close_exits && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.s.close_action == "tray" {
                 winsys::hide_main();
-            }
-            if ctx.input(|i| i.viewport().minimized) == Some(true) && winsys::is_main_visible() {
-                winsys::hide_main();
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
         }
-        // Really closing (no tray, or Quit from the tray) with work in flight: ask first.
-        let to_tray = self.s.minimize_to_tray && !winsys::QUITTING.load(std::sync::atomic::Ordering::Relaxed);
-        if !to_tray && !self.quit_confirmed && ctx.input(|i| i.viewport().close_requested()) && self.busy_count() > 0 {
+        if self.s.minimize_to_tray && !quitting && ctx.input(|i| i.viewport().minimized) == Some(true) && winsys::is_main_visible() {
+            winsys::hide_main();
+        }
+        // Really closing with work in flight: ask first.
+        if close_exits && !self.quit_confirmed && ctx.input(|i| i.viewport().close_requested()) && self.busy_count() > 0 {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             winsys::show_main();
             self.confirm_quit = true;
@@ -1430,6 +1484,16 @@ impl eframe::App for App {
             }
         }
         self.mcp_pump(&ctx);
+        if crate::dlog::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            // Focus diagnostics: where a click lands, and who held the keyboard before it.
+            let (click, pos, win_focused) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.interact_pos(), i.focused));
+            if click {
+                let layer = pos.and_then(|p| ctx.layer_id_at(p));
+                let (focused, modal) = ctx.memory(|m| (m.focused(), m.top_modal_layer()));
+                crate::dlog!("click at {pos:?}: layer {layer:?}, keyboard focus {focused:?}, modal layer {modal:?}, window focused {win_focused}");
+            }
+        }
+        self.merge_found_claude();
         self.housekeeping(&ctx);
         let title = self.active_tab().map(|t| format!("{} — AI Terminal", t.sess.display_name())).unwrap_or_else(|| "AI Terminal".into());
         // Only when it changes: every viewport command requests another frame, so sending it
@@ -1513,6 +1577,7 @@ impl eframe::App for App {
 
         self.viewer(&ctx);
         self.options_window(&ctx);
+        self.options_autosave(&ctx, _frame);
         self.launch_dialog(&ctx);
         self.snippets_palette(&ctx);
         self.scripts_palette(&ctx);
