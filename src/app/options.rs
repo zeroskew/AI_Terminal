@@ -117,14 +117,16 @@ impl App {
                 ui.painter().rect_filled(sep, 0.0, BORDER);
                 // Page content.
                 ui.allocate_ui_with_layout(Vec2::new(size.x - 191.0, size.y), Layout::top_down(Align::Min), |ui| {
+                    // Same 10 px gap above and to the right of the close button.
+                    ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        ui.add_space(ui.available_width() - 40.0);
+                        ui.add_space(ui.available_width() - 38.0);
                         if widgets::icon_button(ui, Icon::Close, 28.0, TEXT_DIM, "Close (Esc)").clicked() {
                             close = true;
                         }
                     });
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 28, top: 10, bottom: 24 }).show(ui, |ui| {
+                        egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 28, top: 0, bottom: 24 }).show(ui, |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
                             match page_now {
                                 OptPage::Terminal => self.options_terminal(ui),

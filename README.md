@@ -120,6 +120,8 @@ build.cmd build --release      (cargo inside the VS 2022 developer environment; 
                                successful --release build is copied into dist\)
 build.cmd test                 (reference detection, image saving, title tests)
 dist.cmd                       (same as build.cmd build --release)
+build_publish_exe.cmd [-y]     (release build into target\release, zips that exe and publishes
+                               it as a GitHub Release tagged v<build version>; -y skips the prompt)
 build.cmd run --example mkicon (regenerates the icon: tools\mkicon.rs → assets\)
 ```
 
