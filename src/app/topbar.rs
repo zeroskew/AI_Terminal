@@ -243,37 +243,60 @@ impl App {
         let cost_pill = tab.sess.cost.filter(|_| self.s.show_cost);
         let plan_pill = if self.s.usage_as == "plan" { Some(tab.sess.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).copied()) } else { None };
         let attention_pill = tab.sess.attention.clone();
-        // The model actually answering (from the transcript) goes in the profile pill, else the
-        // launch model gets its own; the effort has its own pill (click to change).
+        // One pill: profile · model (the one actually answering, from the transcript, else the
+        // launch model) · effort. Clicking it opens the model / effort picker.
         let live_model = tab.sess.model.clone();
-        let model_pill = if live_model.is_some() { None } else { tab.sess.opts.model.clone() };
+        let model = live_model.clone().or_else(|| tab.sess.opts.model.clone());
         let kind = tab.sess.profile.kind;
-        let effort_pill = kind.has_effort().then(|| {
+        let effort_text = kind.has_effort().then(|| {
             let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
-            let model = tab.sess.opts.model.clone().or_else(|| live_model.clone());
-            let levels = catalog.efforts(kind, model.as_deref());
-            let default = catalog.default_effort(kind, model.as_deref());
-            (tab.sess.effort(), default, levels)
+            let launch = tab.sess.opts.model.clone().or_else(|| live_model.clone());
+            match (tab.sess.effort(), catalog.default_effort(kind, launch.as_deref())) {
+                (Some(e), _) => format!("effort {e}"),
+                (None, Some(d)) => format!("effort {d}"),
+                (None, None) => "effort auto".to_string(),
+            }
         });
+        let mut model_parts: Vec<String> = Vec::new();
+        if model.is_some() || profile != name {
+            model_parts.push(profile.clone());
+        }
+        if let Some(m) = &model {
+            model_parts.push(crate::cost::model_label(m));
+        }
+        model_parts.extend(effort_text);
+        let model_pill = model_parts.join(" · ");
+        let model_tip = match (&live_model, &model) {
+            (Some(m), _) => format!("Model of the latest reply: {m}"),
+            (None, Some(m)) => format!("Launch model: {m}"),
+            _ => String::new(),
+        };
         let ctx = ui.ctx().clone();
         let mut open: Option<PathBuf> = None;
         let mut restart = false;
         let mut compact = false;
         let mut change_model = false;
-        let mut set_effort: Option<String> = None;
         // Claude and Codex both have /model and /compact.
         let is_codex = tab.sess.profile.kind == Kind::Codex;
         let can_compact = exited.is_none() && (tab.sess.profile.kind == Kind::Claude || is_codex);
         ui.horizontal_centered(|ui| {
-            let name_for_pill = name.clone();
             ui.label(RichText::new(name).family(bold()).size(14.0).color(TEXT));
-            if let Some(m) = &live_model {
-                widgets::pill(ui, &format!("{profile} · {}", crate::cost::model_label(m)), TEXT_DIM, CARD_HI).on_hover_text(format!("Model of the latest reply: {m}"));
-            } else if profile != name_for_pill {
-                widgets::pill(ui, &profile, TEXT_DIM, CARD_HI);
-            }
-            if can_compact && super::status_bar::link_button(ui, "change", if is_codex { "Switch this session to another model or reasoning effort (opens Codex's /model picker)" } else { "Switch this session to another model (sends /model)" }) {
-                change_model = true;
+            if !model_pill.is_empty() {
+                let pill = widgets::pill(ui, &model_pill, TEXT_DIM, CARD_HI);
+                if can_compact {
+                    let resp = ui.interact(pill.rect, ui.auto_id_with("model_pill"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.hovered() {
+                        ui.painter().rect_stroke(pill.rect, pill.rect.height() / 2.0, Stroke::new(1.0, LINK), egui::StrokeKind::Inside);
+                    }
+                    let how = if is_codex { "Click to change the model or reasoning effort (opens Codex's /model picker)." } else { "Click to change the model or reasoning effort." };
+                    let tip = if model_tip.is_empty() { how.to_string() } else { format!("{model_tip}
+{how}") };
+                    if resp.on_hover_text(tip).clicked() {
+                        change_model = true;
+                    }
+                } else if !model_tip.is_empty() {
+                    pill.on_hover_text(model_tip);
+                }
             }
             if busy_pill {
                 widgets::pill(ui, "working…", Color32::WHITE, Color32::from_rgb(28, 92, 160));
@@ -313,48 +336,6 @@ impl App {
             }
             if unrestricted_pill {
                 widgets::pill(ui, "unrestricted", Color32::WHITE, Color32::from_rgb(150, 80, 20)).on_hover_text("Permission prompts are skipped");
-            }
-            if let Some(m) = &model_pill {
-                widgets::pill(ui, m, TEXT_DIM, CARD_HI);
-            }
-            if let Some((cur, default, levels)) = &effort_pill {
-                let text = match (cur, default) {
-                    (Some(e), _) => format!("effort {e}"),
-                    (None, Some(d)) => format!("effort {d} (default)"),
-                    (None, None) => "effort auto".to_string(),
-                };
-                let pill = widgets::pill(ui, &text, TEXT_DIM, CARD_HI);
-                if exited.is_some() {
-                    pill.on_hover_text("Reasoning effort");
-                } else {
-                    let resp = ui.interact(pill.rect, ui.auto_id_with("effort_pill"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if resp.hovered() {
-                        ui.painter().rect_stroke(pill.rect, pill.rect.height() / 2.0, Stroke::new(1.0, LINK), egui::StrokeKind::Inside);
-                    }
-                    let resp = resp.on_hover_text(if is_codex {
-                        "Reasoning effort of the current turn. Click to change it (opens Codex's /model picker)."
-                    } else {
-                        "Reasoning effort. Click to change it (sends /effort; Claude Code also saves it as your default, except max)."
-                    });
-                    if is_codex {
-                        if resp.clicked() {
-                            change_model = true;
-                        }
-                    } else {
-                        egui::Popup::menu(&resp).show(|ui| {
-                            if ui.selectable_label(cur.is_none(), "auto").on_hover_text("The model's default effort").clicked() {
-                                set_effort = Some("auto".to_string());
-                                ui.close();
-                            }
-                            for e in levels {
-                                if ui.selectable_label(cur.as_deref() == Some(e.as_str()), e).clicked() {
-                                    set_effort = Some(e.clone());
-                                    ui.close();
-                                }
-                            }
-                        });
-                    }
-                }
             }
             ui.label(RichText::new(cwd).size(12.0).color(TEXT_FAINT));
             if let Some(code) = exited {
@@ -414,16 +395,12 @@ impl App {
         if compact {
             self.send_command_to(id, "/compact");
         }
-        if let Some(e) = set_effort {
-            // The session notes it from the typed line (restarts / resumes keep it).
-            self.send_command_to(id, &format!("/effort {e}"));
-        }
         if change_model {
             if is_codex {
                 // Codex has its own model and reasoning-effort picker.
                 self.send_command_to(id, "/model");
             } else {
-                self.model_switch = Some(id);
+                self.model_switch = self.tabs.iter().find(|t| t.sess.id == id).map(|t| super::model_switch::ModelSwitch::new(&t.sess));
             }
         }
     }

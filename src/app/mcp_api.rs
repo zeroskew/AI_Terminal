@@ -243,7 +243,7 @@ impl App {
             let r = self.mcp_call(ctx, &c.tool, &c.args, &c.session);
             let _ = c.reply.send(r);
         }
-        if !self.enter_due.is_empty() {
+        if !self.enter_due.is_empty() || !self.cmd_due.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(60));
         }
         // Press Enter for messages pasted a moment ago (Claude needs the paste to land first).
@@ -253,6 +253,17 @@ impl App {
         for id in due {
             if let Some(t) = self.tabs.iter_mut().find(|t| t.sess.id == id) {
                 t.sess.write(b"\r".to_vec());
+            }
+        }
+        // Queued commands, once their time has come and no Enter is pending for the session.
+        let mut i = 0;
+        while i < self.cmd_due.len() {
+            let (id, at, _) = &self.cmd_due[i];
+            if now >= *at && !self.enter_due.iter().any(|(e, _)| e == id) {
+                let (id, _, cmd) = self.cmd_due.remove(i);
+                self.send_command_to(id, &cmd);
+            } else {
+                i += 1;
             }
         }
         // Deliver.
