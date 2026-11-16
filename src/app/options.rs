@@ -123,7 +123,7 @@ impl App {
                             close = true;
                         }
                     });
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
                         egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 28, top: 10, bottom: 24 }).show(ui, |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
                             match page_now {
@@ -221,7 +221,7 @@ impl App {
                     ui.close();
                 }
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(360.0).show_hinted(ui, |ui| {
                     for f in crate::fonts::mono_families() {
                         if ui.button(&f).on_hover_text("Use this font first; the rest of the list stays as fallback").clicked() {
                             let rest: Vec<String> = crate::fonts::parse_list(&self.s.code_font).into_iter().filter(|x| !x.eq_ignore_ascii_case(&f)).collect();
@@ -427,6 +427,15 @@ impl App {
         }
         Self::opt_check(ui, &mut self.s.minimize_to_tray, "Minimize to system tray", "When minimizing or closing the window, hide it to the system tray and keep sessions running. Quit from the tray icon's menu.");
 
+        Self::opt_heading(ui, "UPDATES");
+        Self::opt_check(ui, &mut self.s.auto_update, "Update automatically", "Check GitHub for a new release at start-up and every few hours, download it in the background, and install it when AI Terminal restarts.");
+        ui.horizontal(|ui| {
+            ui.add_space(28.0);
+            if ui.button("Check for updates…").clicked() {
+                self.open_update_dialog(ui.ctx());
+            }
+            ui.label(RichText::new(format!("Version {}", crate::update::VERSION)).size(12.5).color(TEXT_DIM));
+        });
         Self::opt_heading(ui, "NOTIFICATIONS");
         Self::opt_check(ui, &mut self.s.notifications, "Desktop notifications", "Show a notification when a session needs attention (Claude finished, or asks for permission) and you're not looking at it.");
         ui.horizontal(|ui| {
@@ -567,7 +576,12 @@ impl App {
                 ui.add_space(10.0);
                 ui.label(RichText::new("AI Terminal").family(bold()).size(30.0).color(Color32::WHITE));
                 ui.label(RichText::new("Terminal sessions for Claude Code, Codex and shells").size(15.0).color(TEXT_DIM));
-                ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).size(13.0).color(TEXT_FAINT));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Version {}", crate::update::VERSION)).size(13.0).color(TEXT_FAINT));
+                    if ui.small_button("Check for updates…").clicked() {
+                        self.open_update_dialog(ui.ctx());
+                    }
+                });
             });
         });
         ui.add_space(18.0);

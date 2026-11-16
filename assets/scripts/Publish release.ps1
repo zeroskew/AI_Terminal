@@ -9,7 +9,12 @@ $exe = Join-Path $root 'dist\ai_terminal.exe'
 if (-not (Test-Path $exe)) { Write-Host "dist\ai_terminal.exe not found - run a release build first." -ForegroundColor Red; exit 1 }
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Host "GitHub CLI (gh) is not installed." -ForegroundColor Red; exit 1 }
 
-$tag = 'v' + (Get-Date -Format 'yyyy.MM.dd-HHmm')   # every publish is a new release, no manual version bump
+# The tag is the build's own version stamp (UTC build time), so the app's self-update can tell
+# whether a release is newer than itself. Every release build gets a new one; no manual bump.
+$version = (& $exe --version | Out-String).Trim()
+if ($version -notmatch '^\d{4}\.\d{2}\.\d{2}-\d{4}$') { Write-Host "dist\ai_terminal.exe doesn't report a version (got '$version') - rebuild it." -ForegroundColor Red; exit 1 }
+$tag = "v$version"
+if (gh release view $tag 2>$null) { Write-Host "Release $tag already exists - rebuild to get a new version." -ForegroundColor Red; exit 1 }
 
 # The tag must point at pushed code
 if (git status --porcelain) { Write-Host "Warning: uncommitted changes in the working tree." -ForegroundColor Yellow }

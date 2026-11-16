@@ -158,7 +158,7 @@ impl App {
             ui.horizontal_top(|ui| {
                 // List.
                 ui.allocate_ui_with_layout(Vec2::new(size.x * 0.38, body_h), Layout::top_down(Align::Min), |ui| {
-                    egui::ScrollArea::vertical().id_salt("plugin_list").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("plugin_list").max_height(body_h).auto_shrink([false, false]).show_hinted(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for p in &shown {
                             let id = p.id();
@@ -196,7 +196,7 @@ impl App {
                 ui.add_space(16.0);
                 // Details.
                 ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), body_h), Layout::top_down(Align::Min), |ui| {
-                    egui::ScrollArea::vertical().id_salt("plugin_detail").max_height(body_h).auto_shrink([false, false]).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("plugin_detail").max_height(body_h).auto_shrink([false, false]).show_hinted(ui, |ui| {
                         let Some(p) = st.selected.as_ref().and_then(|id| st.catalogue.iter().find(|p| &p.id() == id)) else {
                             ui.label(RichText::new("Pick a plugin on the left.").color(TEXT_FAINT));
                             return;
@@ -272,7 +272,7 @@ impl App {
                 ui.add_space(6.0);
                 egui::Frame::new().fill(TERM_LOG_BG).corner_radius(6).inner_margin(8).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    egui::ScrollArea::vertical().id_salt("plugin_log").max_height(130.0).stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("plugin_log").max_height(130.0).stick_to_bottom(true).auto_shrink([false, false]).show_hinted(ui, |ui| {
                         for l in st.job.lock().unwrap().log.iter() {
                             ui.label(RichText::new(l).monospace().size(12.0).color(TEXT_DIM));
                         }

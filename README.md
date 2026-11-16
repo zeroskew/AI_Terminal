@@ -18,7 +18,9 @@ images inside the terminal**.
 
 **[Download ai_terminal.zip](https://github.com/zeroskew/AI_Terminal/releases/latest/download/ai_terminal.zip)**
 (latest release). Unzip and run `ai_terminal.exe`; there is no installer. All releases are on the
-[Releases page](https://github.com/zeroskew/AI_Terminal/releases).
+[Releases page](https://github.com/zeroskew/AI_Terminal/releases). AI Terminal updates itself: it
+checks for a new release now and then, downloads it in the background and, when you restart,
+installs it over the exe you started (Options > General > Updates).
 
 ## Features
 

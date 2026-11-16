@@ -57,7 +57,7 @@ impl App {
                 Some((tex, size, _)) => {
                     let s = Vec2::new(size[0] as f32, size[1] as f32);
                     let k = if zoom_fit { (max.x / s.x).min((max.y - 70.0) / s.y).min(1.0) } else { 1.0 };
-                    egui::ScrollArea::both().max_width(max.x).max_height(max.y - 70.0).show(ui, |ui| {
+                    egui::ScrollArea::both().max_width(max.x).max_height(max.y - 70.0).show_hinted(ui, |ui| {
                         let r = ui.add(egui::Image::new((tex, s * k)).sense(Sense::click()));
                         if r.clicked() {
                             zoom_fit = !zoom_fit;

@@ -218,7 +218,7 @@ impl App {
                     if !r.collapsed {
                         egui::Frame::new().fill(BG).corner_radius(4).inner_margin(6).show(ui, |ui| {
                             // Once resized, the output keeps that height; by default it fits short output.
-                            egui::ScrollArea::vertical().id_salt(("script_out", r.id)).max_height(out_h).stick_to_bottom(true).auto_shrink([false, size.is_none()]).show(ui, |ui| {
+                            egui::ScrollArea::vertical().id_salt(("script_out", r.id)).max_height(out_h).stick_to_bottom(true).auto_shrink([false, size.is_none()]).show_hinted(ui, |ui| {
                                 let t = if text.is_empty() { "(no output yet)" } else { text.as_str() };
                                 ui.add(egui::Label::new(RichText::new(t).monospace().size(12.0).color(TEXT_DIM)).wrap().selectable(true));
                             });
@@ -339,7 +339,7 @@ impl App {
             if self.scripts.is_empty() {
                 ui.label(RichText::new("No scripts yet. Put .ps1, .cmd, .bat or .py files in the scripts folder (Open folder), or ask an agent to write one (Edit scripts… > Copy prompt).").color(TEXT_FAINT));
             }
-            super::snippets::palette_scroll(ui, shown.len()).show(ui, |ui| {
+            super::snippets::palette_scroll(ui, shown.len()).show_hinted(ui, |ui| {
                 for i in shown {
                     let sc = &self.scripts[i];
                     // The AI model it will use, else the file type.
@@ -869,7 +869,7 @@ impl App {
                     // ScrollArea would otherwise shrink to whatever is left of the visible window.
                     let row = ui.text_style_height(&egui::TextStyle::Monospace);
                     let h = ((d.text.lines().count().max(4) + 1) as f32 * row + 8.0).min(360.0);
-                    egui::ScrollArea::vertical().id_salt(("script_text", i)).min_scrolled_height(h).max_height(h).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt(("script_text", i)).min_scrolled_height(h).max_height(h).show_hinted(ui, |ui| {
                         ui.add(egui::TextEdit::multiline(&mut d.text).code_editor().desired_rows(4).desired_width(f32::INFINITY));
                     });
                 }

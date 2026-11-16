@@ -93,7 +93,7 @@ impl App {
             ui.add_space(4.0);
             ui.label(RichText::new("Each enabled server adds its tools to every request. Switch off the ones this project doesn't need. Run /context in a session to see what each one costs.").color(TEXT_DIM).size(12.5));
             ui.add_space(12.0);
-            egui::ScrollArea::vertical().max_height(480.0).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(480.0).auto_shrink([false, true]).show_hinted(ui, |ui| {
                 // Built in.
                 ui.label(RichText::new("BUILT INTO CLAUDE CODE").size(11.5).family(bold()).color(TEXT_FAINT));
                 ui.add_space(6.0);

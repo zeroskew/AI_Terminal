@@ -282,7 +282,7 @@ impl App {
         // While filtering, matching archived sessions show too.
         let show_archived = self.show_archived || !filter.is_empty();
         let today = local_day(now_secs());
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
             let mut last_group: Option<String> = None;
             let mut pinned_rects: Vec<(u64, egui::Rect)> = Vec::new();
             for row in &rows {
@@ -337,13 +337,8 @@ impl App {
                 if row.busy {
                     // Working: a ring spinning around the icon (redraws only while one is busy).
                     let t = ui.input(|i| i.time) as f32;
-                    let a0 = t * 5.0;
-                    let pts: Vec<egui::Pos2> = (0..=16).map(|k| {
-                        let a = a0 + k as f32 / 16.0 * std::f32::consts::PI * 1.3;
-                        icon_c + Vec2::new(a.cos(), a.sin()) * 10.5
-                    }).collect();
-                    p.add(egui::Shape::line(pts, Stroke::new(1.8, ACCENT_HI)));
-                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                    widgets::paint_busy_ring(p, icon_c, 10.5, t);
+                    ui.ctx().request_repaint_after(Duration::from_millis(33));
                 }
                 if row.attention {
                     p.circle_filled(egui::pos2(rect.left() + 24.0, rect.center().y - 6.0), 3.5, ACCENT_HI);
