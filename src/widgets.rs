@@ -344,3 +344,82 @@ fn antigravity_colour(x: f32, y: f32) -> Color32 {
     let ch = |k: usize| (rgb[k] / sum.max(1e-6)).round() as u8;
     Color32::from_rgb(ch(0), ch(1), ch(2))
 }
+
+/// The "working" ring around a session icon: a faint track with a comet-like arc on it. The arc
+/// breathes (grows and shrinks) while it spins, its tail fades from cyan to the accent blue and
+/// thins out, and its head carries a small glow. `t` is the UI time in seconds.
+pub fn paint_busy_ring(p: &egui::Painter, c: Pos2, radius: f32, t: f32) {
+    use std::f32::consts::PI;
+    p.circle_stroke(c, radius, Stroke::new(1.0, Color32::from_rgba_unmultiplied(56, 152, 236, 28)));
+    // Breathing length (0.2..1.4 π), steady spin plus a little lurch when the arc is long.
+    let breathe = 0.5 - 0.5 * (t * 2.4).cos();
+    let len = PI * (0.2 + 1.2 * breathe);
+    let head = t * 4.6 + breathe * 1.2;
+    let lerp = |a: u8, b: u8, k: f32| (a as f32 + (b as f32 - a as f32) * k).round() as u8;
+    const N: usize = 28;
+    let at = |k: f32| {
+        let a = head - len * (1.0 - k);
+        c + Vec2::new(a.cos(), a.sin()) * radius
+    };
+    for i in 0..N {
+        // k: 0 at the tail end, 1 at the head.
+        let k0 = i as f32 / N as f32;
+        let k1 = (i + 1) as f32 / N as f32;
+        let col = Color32::from_rgba_unmultiplied(lerp(80, 120, k1), lerp(220, 190, k1), 255, (255.0 * k1.powf(1.6)) as u8);
+        p.line_segment([at(k0), at(k1)], Stroke::new(0.6 + 1.6 * k1, col));
+    }
+    // Glowing head.
+    let h = c + Vec2::new(head.cos(), head.sin()) * radius;
+    let pulse = 0.5 + 0.5 * (t * 6.0).sin();
+    p.circle_filled(h, 3.6 + pulse * 0.8, Color32::from_rgba_unmultiplied(120, 200, 255, 40));
+    p.circle_filled(h, 2.2, Color32::from_rgba_unmultiplied(150, 215, 255, 120));
+    p.circle_filled(h, 1.3, Color32::from_rgb(235, 248, 255));
+}
+
+/// `ScrollArea::show` that also paints a "more below" arrow at the bottom of the viewport while
+/// there is content scrolled out of view (the floating scroll bar is hidden until hovered, so
+/// otherwise nothing tells you the window scrolls).
+pub trait ScrollMoreHint {
+    fn show_hinted<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R>;
+}
+
+impl ScrollMoreHint for egui::ScrollArea {
+    fn show_hinted<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
+        let out = self.show(ui, add);
+        // The floating scroll bar shows while the pointer is over the area; the arrow steps aside
+        // then (fading in step with the bar) and comes back when the pointer leaves.
+        let shown = ui.ctx().animate_bool(out.id.with("more_below"), !ui.rect_contains_pointer(out.inner_rect));
+        let remaining = out.content_size.y - out.inner_rect.height() - out.state.clamped_offset().y;
+        paint_more_below(ui, out.inner_rect, remaining, shown);
+        out
+    }
+}
+
+/// Paints the "more below" arrow at the bottom of `rect`; `remaining` is how many points of
+/// content are left below the viewport (it fades in over the first few points); `shown` (0..1)
+/// scales its opacity.
+fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
+    let k = (remaining / 24.0).clamp(0.0, 1.0) * shown;
+    if k <= 0.0 || rect.height() < 60.0 {
+        return;
+    }
+    let p = ui.painter().with_clip_rect(rect);
+    let a = |v: f32| (v * k) as u8;
+    // A soft fade over the bottom edge, then a round badge with a down chevron.
+    let fade = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 28.0), rect.right_bottom());
+    let mut mesh = egui::Mesh::default();
+    let (top, bottom) = (Color32::TRANSPARENT, Color32::from_rgba_unmultiplied(0, 0, 0, a(110.0)));
+    mesh.colored_vertex(fade.left_top(), top);
+    mesh.colored_vertex(fade.right_top(), top);
+    mesh.colored_vertex(fade.left_bottom(), bottom);
+    mesh.colored_vertex(fade.right_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    p.add(Shape::mesh(mesh));
+    let c = Pos2::new(rect.center().x, rect.bottom() - 14.0);
+    let bg = CARD_HI;
+    p.circle(c, 10.0, Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), a(235.0)), Stroke::new(1.0, Color32::from_rgba_unmultiplied(BORDER.r(), BORDER.g(), BORDER.b(), a(255.0))));
+    let col = Color32::from_rgba_unmultiplied(TEXT.r(), TEXT.g(), TEXT.b(), a(230.0));
+    let (w, h) = (4.5, 2.5);
+    p.add(Shape::line(vec![Pos2::new(c.x - w, c.y - h + 0.5), Pos2::new(c.x, c.y + h + 0.5), Pos2::new(c.x + w, c.y - h + 0.5)], Stroke::new(1.6, col)));
+}

@@ -22,6 +22,7 @@ mod session;
 mod term_theme;
 mod theme;
 mod titlebar;
+mod update;
 mod view;
 mod widgets;
 mod winsys;
@@ -57,7 +58,13 @@ fn main() -> eframe::Result<()> {
     if args.len() >= 2 && args[1] == "--statusline" {
         hooks::statusline_main();
     }
+    // `ai_terminal.exe --version`: the build version (the publish script tags the release with it).
+    if args.len() >= 2 && args[1] == "--version" {
+        println!("{}", update::VERSION);
+        return Ok(());
+    }
     drop_parent_claude_env();
+    update::init();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("AI Terminal")
@@ -70,5 +77,8 @@ fn main() -> eframe::Result<()> {
     // `--test-instance` keeps its own settings (%APPDATA%\AI Terminal Test), so automated test
     // runs never touch the user's projects and sessions.
     let app_name = if std::env::args().any(|a| a == "--test-instance") { "AI Terminal Test" } else { "AI Terminal" };
-    eframe::run_native(app_name, options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    let result = eframe::run_native(app_name, options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))));
+    // The window is gone: install a downloaded update (and start again for "Restart now").
+    update::apply_on_exit();
+    result
 }

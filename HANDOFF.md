@@ -37,6 +37,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
   - `--plugins`, `--plugins-sources`, `--view-image <file>`
   - `--debug-log` (log goes to `%LOCALAPPDATA%\AI_Terminal\logs\ai_terminal.log`)
   - `--no-previews`, `--pin <n>`
+  - `--check-updates` (opens the Check for updates dialog; a test instance downloads to `update-test`). To test a real download + swap, build with `AI_TERMINAL_VERSION=2026.01.01-0000` and run a copy from outside `target`
   - `--home` (opens on the Home page)
   - `--search <text>` (opens the Search window and runs it)
 - Real Claude end-to-end runs (`--start Claude --type "..."`) work; Claude opens in the selected
@@ -61,6 +62,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 | `plugins.rs` | Claude Code plugin catalogue (marketplace.json files + built-in directory cache), installed list, background `claude plugin …` jobs |
 | `mcp_servers.rs` | Per-project MCP on/off: `claude mcp list` (parsed) + `~/.claude.json` `projects[<path>].disabledMcpServers` (what `/mcp` writes); built-in `claude-artifacts` (not in `mcp list`) via a `permissions.deny: ["Artifact"]` rule in `<project>/.claude/settings.local.json` (Claude Code 2.1.325 skips the server when the Artifact tool is denied; env `CLAUDE_CODE_ARTIFACT=0` also works); `describe()` = per-server help text |
 | `search.rs` / `app/search_ui.rs` | Transcript search (user + agent text parts of Claude / Codex messages; raw-line prefilter, then JSON parse) on a thread; non-modal Search window (all sessions / current, days back), jump = select or resume + terminal find bar |
+| `update.rs` / `app/update_ui.rs` / `tools/relauncher.rs` | Self-update. build.rs stamps `AI_TERMINAL_VERSION` (UTC `YYYY.MM.DD-HHMM`; `--version` prints it; Publish release.ps1 tags `v<version>`) and compiles `tools/relauncher.rs` (std only), embedded with `include_bytes!`. A thread asks the GitHub API for the latest release, downloads `ai_terminal.zip` (WinHTTP) to `%LOCALAPPDATA%\AI_Terminal\update\` and unzips the exe (miniz_oxide). At exit (Restart now, or any quit) main.rs writes the relauncher to `%TEMP%\AI_Terminal\` and starts it: it waits until the exe this process was launched from is unlocked, swaps it (`.old` backup, restored on failure), optionally starts it again; log `relauncher.log` beside it. Auto checks (Options > General > Update automatically) are off for exes under a `target` folder |
 | `keys.rs` | Reassignable shortcuts (19 commands, stored as text overrides) |
 | `links.rs` | URL / file:line detection, open in browser / editor |
 | `winsys.rs` | Tray icon + toast (Shell_NotifyIcon), Run-key autostart, taskbar overlay badge, memory reading, sound |

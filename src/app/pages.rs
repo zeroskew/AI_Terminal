@@ -10,7 +10,7 @@ impl App {
         let mut set_tab: Option<(PathBuf, bool)> = None;
         let mut remove: Option<PathBuf> = None;
         let tab_order = self.tab_projects();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
             ui.add_space(24.0);
             ui.horizontal(|ui| {
                 ui.add_space(24.0);

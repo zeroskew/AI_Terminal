@@ -151,6 +151,7 @@ impl App {
             self.usage_limits(ui);
             self.session_links(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                self.update_notice(ui);
                 ui.label(RichText::new("Ctrl+V pastes images  ·  Ctrl+N new Claude session  ·  Ctrl+Tab switch").color(TEXT_DIM).size(12.5));
                 if let Some(t) = self.active_tab() {
                     let n = t.sess.pasted_images.len();

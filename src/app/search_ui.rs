@@ -255,7 +255,7 @@ impl App {
                 let mut found = found;
                 found.sort_by(|a, b| b.newest.cmp(&a.newest));
                 let wrap = ui.available_width() - 40.0;
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
                     for f in &found {
                         let info = self.session_by_agent(&f.agent_id);
                         let (name, project, icon, state) = match &info {

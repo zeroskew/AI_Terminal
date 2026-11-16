@@ -92,7 +92,7 @@ impl App {
             if self.s.snippets.is_empty() {
                 ui.label(RichText::new("No snippets yet. Add some in Options > Snippets.").color(TEXT_FAINT));
             }
-            palette_scroll(ui, shown.len()).show(ui, |ui| {
+            palette_scroll(ui, shown.len()).show_hinted(ui, |ui| {
                 for i in shown {
                     let sn = &self.s.snippets[i];
                     if palette_row(ui, &sn.name, sn.text.lines().next().unwrap_or(""), if sn.send { "↵ sends" } else { "" }).clicked() {

@@ -14,7 +14,7 @@ use crate::session::{Profile, Session};
 use crate::term_theme;
 use crate::theme::*;
 use crate::view::{self, Action, ViewOptions, ViewState};
-use crate::widgets::{self, Icon};
+use crate::widgets::{self, Icon, ScrollMoreHint};
 use crate::winsys;
 use crate::{keys, mcp, plugins};
 
@@ -34,6 +34,7 @@ mod pages;
 mod status_bar;
 mod viewer;
 mod search_ui;
+mod update_ui;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Project {
@@ -285,6 +286,8 @@ pub struct Settings {
     /// Search window: every session (else the current one), and how many days back (0 = all).
     pub search_all: bool,
     pub search_days: u32,
+    /// Check GitHub for a new release now and then, download it, and install it at the next restart.
+    pub auto_update: bool,
     /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
     /// files, so it reads as 0 there (not the struct default).
     #[serde(default)]
@@ -349,6 +352,7 @@ impl Default for Settings {
             script_panel_size: None,
             search_all: true,
             search_days: 0,
+            auto_update: true,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
                 Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
@@ -571,6 +575,10 @@ pub struct App {
     open_new_menu: bool,
     /// The Search window (open while Some).
     search_ui: Option<search_ui::SearchUi>,
+    /// The Check for updates dialog is open.
+    update_dialog: bool,
+    /// The update whose "downloaded" toast was shown (once per tag).
+    update_announced: Option<String>,
 }
 
 fn project_name(p: &Path) -> String {
@@ -695,6 +703,8 @@ impl App {
             show_archived: false,
             open_new_menu: std::env::args().any(|a| a == "--new-menu"),
             search_ui: None,
+            update_dialog: std::env::args().any(|a| a == "--check-updates"),
+            update_announced: None,
         };
         let ctx = cc.egui_ctx.clone();
         // MCP server for the sessions (tools to work with AI Terminal itself).
@@ -1188,6 +1198,7 @@ impl App {
     /// Window / tray / notification / auto-close housekeeping, once per frame.
     fn housekeeping(&mut self, ctx: &egui::Context) {
         crate::dlog::ENABLED.store(self.s.debug_logging, std::sync::atomic::Ordering::Relaxed);
+        self.update_housekeeping(ctx);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true)) && winsys::is_main_visible();
         self.auto_archive();
 
@@ -1420,7 +1431,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1506,6 +1517,7 @@ impl eframe::App for App {
         self.confirm_close_dialog(&ctx);
         self.remove_project_dialog(&ctx);
         self.quit_dialog(&ctx);
+        self.update_dialog(&ctx);
         self.show_toast(&ctx);
     }
 }
@@ -1556,6 +1568,7 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
                 winsys::QUITTING.store(false, std::sync::atomic::Ordering::Relaxed);
+                crate::update::RELAUNCH.store(false, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
