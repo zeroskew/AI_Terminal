@@ -253,9 +253,9 @@ impl App {
                     }
                 }
             });
-            // Hovering holds it open: the countdown restarts.
-            if r.dismiss_from.is_some() && resp.response.contains_pointer() {
-                r.dismiss_from = Some(Instant::now());
+            // A click in the panel keeps it open (cancels the countdown).
+            if r.dismiss_from.is_some() && resp.response.contains_pointer() && ctx.input(|i| i.pointer.any_pressed()) {
+                r.dismiss_from = None;
             }
             y += resp.response.rect.height() + 8.0;
         }
@@ -380,12 +380,12 @@ pub(super) struct ScriptRun {
     exit: Option<i32>,
     input: String,
     collapsed: bool,
-    /// When the auto-dismiss countdown started (it finished successfully; restarts on hover).
+    /// When the auto-dismiss countdown started (it finished successfully; a click in the panel cancels it).
     dismiss_from: Option<Instant>,
 }
 
 /// How long a finished panel stays before it closes itself.
-const DISMISS_AFTER: Duration = Duration::from_secs(5);
+const DISMISS_AFTER: Duration = Duration::from_secs(10);
 
 /// Output kept per run (older output is dropped).
 const MAX_OUT: usize = 512 * 1024;
@@ -633,7 +633,7 @@ impl App {
                 self.sync_script_drafts();
             }
         });
-        ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (hover it to keep it open)", DISMISS_AFTER.as_secs()));
+        ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (click it to keep it open)", DISMISS_AFTER.as_secs()));
         ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
         ui.add_space(8.0);
         let mut remove = None;
