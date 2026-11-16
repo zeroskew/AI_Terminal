@@ -220,10 +220,10 @@ impl App {
             return;
         }
         let exe = |kind: Kind| self.profiles.iter().find(|p| p.kind == kind).map(|p| p.program.clone()).filter(|p| p.to_lowercase().ends_with(".exe") && !p.to_lowercase().ends_with("cmd.exe"));
-        let (claude, codex) = (exe(Kind::Claude), exe(Kind::Codex));
+        let (claude, codex, agy) = (exe(Kind::Claude), exe(Kind::Codex), exe(Kind::Antigravity));
         let (cat, loading, ctx) = (self.catalog.clone(), self.catalog_loading.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let c = agents::load_catalog(claude, codex);
+            let c = agents::load_catalog(claude, codex, agy);
             *cat.lock().unwrap() = Some(c);
             loading.store(false, Ordering::SeqCst);
             ctx.request_repaint();
@@ -317,21 +317,7 @@ impl App {
                 if kind.has_effort() {
                 ui.label(RichText::new("Effort").color(TEXT));
                 let sel_model = d.opts.model.as_ref().and_then(|m| models.iter().find(|x| &x.id == m));
-                let mut levels: Vec<String> = match sel_model {
-                    Some(m) if !m.efforts.is_empty() => m.efforts.clone(),
-                    _ if is_claude => catalog.claude_efforts.clone(),
-                    _ => {
-                        let mut all: Vec<String> = Vec::new();
-                        for m in &models {
-                            for e in &m.efforts {
-                                if !all.contains(e) {
-                                    all.push(e.clone());
-                                }
-                            }
-                        }
-                        all
-                    }
-                };
+                let mut levels = catalog.efforts(kind, d.opts.model.as_deref());
                 if let Some(e) = d.opts.effort.clone().filter(|e| !levels.contains(e)) {
                     levels.push(e);
                 }

@@ -232,6 +232,10 @@ pub struct Session {
     pub cost: Option<crate::cost::Summary>,
     /// The model answering, from the latest reply in the transcript (e.g. "claude-opus-5-5").
     pub model: Option<String>,
+    /// The effort in use when no launch / typed effort is known: Claude's `effortLevel` setting,
+    /// Codex's current turn (from the transcript). Refreshed every 5 s.
+    pub live_effort: Option<String>,
+    last_effort_scan: Option<std::time::Instant>,
     cost_tracker: crate::cost::Tracker,
     /// Identifies this session in hook events (the AI_TERMINAL_SESSION variable).
     pub hook_key: String,
@@ -314,6 +318,8 @@ impl Session {
             hook_key,
             cost: None,
             model: None,
+            live_effort: None,
+            last_effort_scan: None,
             cost_tracker: Default::default(),
             attention: None,
             busy: false,
@@ -343,6 +349,10 @@ impl Session {
     pub fn poll_agent(&mut self, claimed: &std::collections::HashSet<String>) {
         if !self.profile.is_agent() {
             return;
+        }
+        if self.profile.kind == Kind::Claude && self.last_effort_scan.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(5)) {
+            self.last_effort_scan = Some(std::time::Instant::now());
+            self.live_effort = crate::agents::claude_settings_effort(&self.cwd);
         }
         if self.agent_id.is_none() && self.last_scan.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2)) {
             self.last_scan = Some(std::time::Instant::now());
@@ -379,6 +389,11 @@ impl Session {
                         self.model = Some(m.to_string());
                     }
                 }
+                if self.profile.kind == Kind::Codex {
+                    if let Some(e) = self.cost_tracker.effort() {
+                        self.live_effort = Some(e.to_string());
+                    }
+                }
             }
         }
     }
@@ -397,6 +412,15 @@ impl Session {
         self.write(s.as_bytes().to_vec());
     }
 
+    /// The effort a session should show: Codex's live turn, else the launch / typed effort,
+    /// else Claude's setting. None = the model's default.
+    pub fn effort(&self) -> Option<String> {
+        match self.profile.kind {
+            Kind::Codex => self.live_effort.clone().or_else(|| self.opts.effort.clone()),
+            _ => self.opts.effort.clone().or_else(|| self.live_effort.clone()),
+        }
+    }
+
     /// Keeps a rough copy of the line being typed, so `/clear` (which restarts Claude Code's
     /// image numbering) can be noticed when Enter is pressed.
     fn track_line(&mut self, bytes: &[u8]) {
@@ -408,6 +432,14 @@ impl Session {
                     let cmd = self.line_buf.trim();
                     if matches!(cmd, "/clear" | "/new" | "/reset") {
                         self.image_base = self.pasted_images.len();
+                    }
+                    if self.profile.kind == Kind::Claude {
+                        if let Some(e) = effort_command(cmd) {
+                            // Restarts / resumes keep it; "auto" (or the bare picker) falls back
+                            // to the settings, where Claude saves the choice.
+                            self.opts.effort = e;
+                            self.last_effort_scan = None;
+                        }
                     }
                     self.line_buf.clear();
                 }
@@ -528,5 +560,28 @@ mod tests {
         assert_eq!(pretty_title(r"C:\WINDOWS\system32\cmd.exe - claude", "Claude Code"), "Claude Code - claude");
         assert_eq!(pretty_title("✳ Fix the build", "Claude Code"), "Fix the build");
         assert_eq!(pretty_title("⠂ Build status table", "Claude"), "Build status table");
+    }
+}
+
+/// A typed Claude `/effort` command: Some(Some(level)), Some(None) for "auto" or the bare picker
+/// (the result is read back from the settings), None if it isn't one.
+fn effort_command(line: &str) -> Option<Option<String>> {
+    let mut it = line.split_whitespace();
+    if it.next() != Some("/effort") {
+        return None;
+    }
+    Some(it.next().map(str::to_lowercase).filter(|a| a != "auto"))
+}
+
+#[cfg(test)]
+mod effort_tests {
+    #[test]
+    fn effort_commands() {
+        assert_eq!(super::effort_command("/effort high"), Some(Some("high".into())));
+        assert_eq!(super::effort_command("/effort  MAX "), Some(Some("max".into())));
+        assert_eq!(super::effort_command("/effort auto"), Some(None));
+        assert_eq!(super::effort_command("/effort"), Some(None));
+        assert_eq!(super::effort_command("/efforts"), None);
+        assert_eq!(super::effort_command("set /effort high"), None);
     }
 }

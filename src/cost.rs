@@ -113,6 +113,8 @@ pub struct Tracker {
     context: u64,
     /// The model of the latest reply in the main conversation (Codex: the current turn's).
     model: String,
+    /// Codex: the current turn's reasoning effort.
+    effort: String,
 }
 
 fn new_lines(path: &Path, offsets: &mut HashMap<PathBuf, u64>) -> Vec<String> {
@@ -218,6 +220,11 @@ impl Tracker {
         Some(self.model.as_str()).filter(|m| !m.is_empty())
     }
 
+    /// Codex: the reasoning effort of the current turn, if seen yet.
+    pub fn effort(&self) -> Option<&str> {
+        Some(self.effort.as_str()).filter(|e| !e.is_empty())
+    }
+
     /// Codex: the rollout's latest `total_token_usage` and model.
     pub fn update_codex(&mut self, id: &str) -> Summary {
         if self.codex_file.is_none() {
@@ -227,7 +234,11 @@ impl Tracker {
         for line in new_lines(&f, &mut self.offsets) {
             if line.contains("\"turn_context\"") {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if let Some(m) = v["payload"]["model"].as_str() {
+                    let p = &v["payload"];
+                    if let Some(e) = p["effort"].as_str().or(p["collaboration_mode"]["settings"]["reasoning_effort"].as_str()) {
+                        self.effort = e.to_string();
+                    }
+                    if let Some(m) = p["model"].as_str() {
                         self.model = m.to_string();
                         let u = self.codex.take().map(|c| c.1).unwrap_or_default();
                         self.codex = Some((m.to_string(), u));
