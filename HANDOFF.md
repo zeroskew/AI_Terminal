@@ -32,7 +32,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
   - `--add-project <dir>` (also selects it, so `--start` opens there)
   - `--start <Claude|Codex|pwsh|powershell|cmd>`
   - `--type "<line>"` and `--paste-image <file>` and `--find <text>`: run after `--start`
-  - `--options`, `--options-page <general|images|snippets|shortcuts|about>`, `--launch-dialog`
+  - `--options`, `--options-page <general|images|snippets|scripts|shortcuts|about>`, `--launch-dialog`
   - `--scripts` (opens the palette), `--run-script "<name>"` (runs a script in the selected project; `--type` after it feeds its input)
   - `--plugins`, `--plugins-sources`, `--view-image <file>`
   - `--debug-log` (log goes to `%LOCALAPPDATA%\AI_Terminal\logs\ai_terminal.log`)
@@ -69,7 +69,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 - `Settings` (persisted by eframe, `version` field for migrations, currently 9)
 - projects, live `Tab`s and `Dormant` (listed, not running) sessions
 - top bar (project tabs, drag to reorder) and sidebar (sessions: day groups / pinned, live status, cost, rename, context menu)
-- new-session menu and launch dialog; Options window (General / Terminal / Images / Snippets / Shortcuts / About)
+- new-session menu and launch dialog; Options window (General / Terminal / Images / Snippets / Scripts / Shortcuts / About)
 - plugins window, image viewer, snippets and scripts palettes
 - `housekeeping` (tray, hooks → attention/notifications/badge, auto-close), `mcp_pump` (tool calls, message delivery)
 
@@ -81,9 +81,13 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
   - **Unrestricted:** `--dangerously-skip-permissions`.
   - **With settings:** model, effort, CLI params with history, 1M context.
   - **Codex:** `--dangerously-bypass-approvals-and-sandbox`, `-c model_reasoning_effort=…`.
-- **Session names:** new, unnamed Claude sessions get an `--append-system-prompt` asking Claude to call `rename_session` after the first task (`agents::NAME_SESSION_TEXT`, Options > General > "Ask Claude to name new sessions…"). Not sent on resume.
+- **Session names:** new, unnamed agent sessions are asked to call `rename_session` after the first task (`agents::NAME_SESSION_TEXT`, Options > General > "Ask agents to name new sessions…"). Claude gets it via `--append-system-prompt`, Codex via `-c developer_instructions="..."` (skipped if the user's params already set `developer_instructions`). Other agents aren't wired to the MCP server, so they don't get it. Not sent on resume.
 - **Conversation ids:** found by scanning for new transcripts after spawn (no `--session-id`); then kept current by the SessionStart hook (changes on `/clear`).
 - **Hook events and attention:** events go through files (no named pipe).
+- **Archive:** `SavedSession.archived` / `.used` (last run, set on save / park); `App::auto_archive`
+  (sidebar.rs, every frame in housekeeping) archives listed, unpinned sessions past
+  `Settings.keep_sessions` (default 20, per project, running ones count). "Restore to list" sets
+  `used = now` so the limit doesn't re-archive it.
 - **Paste:** Explorer files → quoted paths; bitmap → PNG path; else text (bracketed when multi-line).
 
 ## User preferences learned

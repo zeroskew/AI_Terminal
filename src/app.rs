@@ -24,6 +24,7 @@ mod snippets;
 mod options;
 mod mcp_api;
 mod launch;
+mod model_switch;
 mod mcp_servers_ui;
 mod sidebar;
 mod topbar;
@@ -69,6 +70,13 @@ pub struct SavedSession {
     /// Pinned to the top (order among pinned); 0 = not pinned.
     #[serde(default)]
     pub pin: u32,
+    /// Moved to the Archived group (hidden from the list until expanded).
+    #[serde(default)]
+    pub archived: bool,
+    /// Unix seconds when it last ran here (0 = unknown: `created` is used). Decides which
+    /// sessions the "keep the last N" limit archives.
+    #[serde(default)]
+    pub used: u64,
 }
 
 /// A session from a previous run that isn't running: listed in the sidebar, started (resumed)
@@ -112,6 +120,15 @@ struct Row {
     /// Share of the 5-hour plan limit, in percentage points.
     plan: Option<f64>,
     pin: u32,
+    /// In the Archived group.
+    archived: bool,
+}
+
+impl Row {
+    /// Running (a live tab whose process hasn't exited).
+    fn is_active(&self) -> bool {
+        self.live && self.exited.is_none()
+    }
 }
 
 /// Percentage points of a plan limit: "0%", "<1%", "7%" (over 100% = more than one window).
@@ -136,21 +153,37 @@ struct LaunchDialog {
 }
 
 /// A row in the New-session menu: icon + label.
-fn menu_item(ui: &mut Ui, (icon, col): (Icon, Color32), label: &str) -> bool {
+fn menu_item(ui: &mut Ui, icon: (Icon, Color32), label: &str) -> bool {
+    menu_row(ui, icon, label, false).clicked()
+}
+
+/// A menu row; `submenu` draws a right arrow (pair it with `egui::containers::menu::SubMenu`).
+fn menu_row(ui: &mut Ui, (icon, col): (Icon, Color32), label: &str, submenu: bool) -> egui::Response {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(300.0), 30.0), Sense::click());
-    if resp.hovered() {
+    use egui::containers::menu::{MenuState, SubMenu};
+    let open = submenu && MenuState::from_ui(ui, |s, _| s.open_item == Some(SubMenu::id_from_widget_id(resp.id)));
+    if resp.hovered() || open {
         ui.painter().rect_filled(r, 4.0, CARD_HI);
     }
     widgets::paint_icon(ui.painter(), icon, egui::pos2(r.left() + 16.0, r.center().y), 15.0, col);
-    ui.painter().text(egui::pos2(r.left() + 36.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), if resp.hovered() { Color32::WHITE } else { TEXT });
-    resp.clicked()
+    let fg = if resp.hovered() || open { Color32::WHITE } else { TEXT };
+    ui.painter().text(egui::pos2(r.left() + 36.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), fg);
+    if submenu {
+        let a = egui::Rect::from_center_size(egui::pos2(r.right() - 14.0, r.center().y), Vec2::splat(10.0));
+        ui.painter().add(egui::containers::menu::SubMenuButton::arrow_shape(a, fg));
+    }
+    resp
 }
 
-/// Claude's orange asterisk, Codex's knot, a prompt for shells.
+/// Claude's orange asterisk, Codex's knot, a four-point star per other agent, a prompt for shells.
 fn agent_icon(p: &Profile) -> (Icon, Color32) {
     match p.kind {
         Kind::Claude => (Icon::Sparkle, Color32::from_rgb(217, 119, 87)),
         Kind::Codex => (Icon::Codex, Color32::from_rgb(200, 204, 212)),
+        Kind::Gemini => (Icon::Star, Color32::from_rgb(110, 155, 245)),
+        Kind::Qwen => (Icon::Star, Color32::from_rgb(160, 130, 240)),
+        Kind::OpenCode => (Icon::Star, Color32::from_rgb(235, 235, 235)),
+        Kind::Kimi => (Icon::Star, Color32::from_rgb(90, 200, 220)),
         Kind::Shell => (Icon::Prompt, Color32::from_rgb(78, 201, 176)),
     }
 }
@@ -176,12 +209,14 @@ pub struct Settings {
     pub term_theme: term_theme::TermTheme,
     pub last_claude_opts: LaunchOpts,
     pub last_codex_opts: LaunchOpts,
+    /// The other agents' last "with settings" values, by kind.
+    pub last_agent_opts: std::collections::HashMap<String, LaunchOpts>,
     pub cli_history: Vec<String>,
     /// Render {red}…{/} colour tags in the terminal.
     pub color_tags: bool,
     /// Tell Claude about the tags (`--append-system-prompt`) in sessions started here.
     pub color_tag_prompt: bool,
-    /// Ask new Claude sessions to name themselves after their first task (rename_session).
+    /// Ask new agent sessions (Claude, Codex) to name themselves after their first task (rename_session).
     pub name_sessions: bool,
     // Options > General.
     pub launch_on_startup: bool,
@@ -207,6 +242,11 @@ pub struct Settings {
     /// What the session usage shows: "plan" (share of the subscription's 5-hour / weekly
     /// limits) or "cost" (estimated API price).
     pub usage_as: String,
+    /// Keep this many most recently used sessions per project in the list; older ones (not
+    /// pinned, not running) move to Archived. 0 = no limit.
+    pub keep_sessions: u32,
+    /// Running sessions go to an Active group at the top of the list (below Pinned).
+    pub active_on_top: bool,
     /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
     /// files, so it reads as 0 there (not the struct default).
     #[serde(default)]
@@ -233,6 +273,7 @@ impl Default for Settings {
             term_theme: Default::default(),
             last_claude_opts: Default::default(),
             last_codex_opts: Default::default(),
+            last_agent_opts: Default::default(),
             cli_history: Vec::new(),
             color_tags: true,
             color_tag_prompt: true,
@@ -253,6 +294,8 @@ impl Default for Settings {
             editor_custom: String::new(),
             show_cost: true,
             usage_as: "plan".into(),
+            keep_sessions: 20,
+            active_on_top: true,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
                 Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
@@ -290,6 +333,7 @@ enum OptPage {
     Terminal,
     Images,
     Snippets,
+    Scripts,
     Shortcuts,
     About,
 }
@@ -390,6 +434,8 @@ pub struct App {
     mcp_servers: Option<mcp_servers_ui::McpServersUi>,
     /// The status bar's "clear" asks first: the session it's for.
     confirm_clear: Option<u64>,
+    /// The header's model "change" dialog: the session it's for.
+    model_switch: Option<u64>,
     /// Home's "Remove" on a project asks first: the project it's for.
     confirm_remove_project: Option<PathBuf>,
     /// Plan usage limits (5-hour / weekly) from Claude's status line, and when they were read.
@@ -409,6 +455,10 @@ pub struct App {
     script_filter: String,
     script_focus: bool,
     scripts: Vec<scripts::Script>,
+    /// Options > Scripts editor state.
+    script_drafts: Vec<scripts::ScriptDraft>,
+    scripts_synced: bool,
+    script_new_ext: String,
     outbox: Vec<Pending>,
     next_msg: u64,
     /// Sessions that get Enter shortly (after a pasted message landed).
@@ -421,10 +471,15 @@ pub struct App {
     /// Started with --minimized (launch at sign-in): hide into the tray on the first frame.
     start_hidden: bool,
     launch: Option<LaunchDialog>,
-    /// Models / efforts for the launch dialog, loaded in the background at start-up.
+    /// Models / efforts for the launch dialog, loaded in the background at start-up and on
+    /// "Refresh models".
     catalog: std::sync::Arc<std::sync::Mutex<Option<agents::Catalog>>>,
+    /// A model refresh is running.
+    catalog_loading: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Hex fields being edited in Options (keyed by colour name).
     hex_edit: std::collections::HashMap<String, String>,
+    /// The sidebar's Archived group is expanded.
+    show_archived: bool,
 }
 
 fn project_name(p: &Path) -> String {
@@ -503,6 +558,7 @@ impl App {
             plugins: None,
             mcp_servers: None,
             confirm_clear: None,
+            model_switch: None,
             confirm_remove_project: None,
             limits: None,
             limits_read: None,
@@ -519,6 +575,9 @@ impl App {
             script_filter: String::new(),
             script_focus: false,
             scripts: Vec::new(),
+            script_drafts: Vec::new(),
+            scripts_synced: false,
+            script_new_ext: "ps1".into(),
             outbox: Vec::new(),
             next_msg: 0,
             enter_due: Vec::new(),
@@ -528,7 +587,9 @@ impl App {
             start_hidden: std::env::args().any(|a| a == "--minimized"),
             launch: None,
             catalog: Default::default(),
+            catalog_loading: Default::default(),
             hex_edit: Default::default(),
+            show_archived: false,
         };
         let ctx = cc.egui_ctx.clone();
         // MCP server for the sessions (tools to work with AI Terminal itself).
@@ -544,15 +605,7 @@ impl App {
             }
             Err(e) => crate::dlog!("mcp server failed: {e}"),
         }
-        {
-            let cat = app.catalog.clone();
-            let claude = app.profiles.iter().find(|p| p.kind == Kind::Claude).map(|p| p.program.clone()).filter(|p| p.to_lowercase().ends_with(".exe") && !p.to_lowercase().ends_with("cmd.exe"));
-            let codex = app.profiles.iter().find(|p| p.kind == Kind::Codex).map(|p| p.program.clone()).filter(|p| p.to_lowercase().ends_with(".exe") && !p.to_lowercase().ends_with("cmd.exe"));
-            std::thread::spawn(move || {
-                let c = agents::load_catalog(claude, codex);
-                *cat.lock().unwrap() = Some(c);
-            });
-        }
+        app.refresh_catalog(&ctx);
         let selected = app.s.selected_project.clone();
         // Nothing starts by itself: sessions from last time are listed and resume when clicked.
         let saved = if app.s.reopen_sessions { std::mem::take(&mut app.s.sessions) } else { Vec::new() };
@@ -562,8 +615,8 @@ impl App {
                     ss.created = now_secs();
                 }
                 ss.profile.fix_kind();
-                if !ss.profile.is_agent() {
-                    // Shell sessions aren't kept between runs.
+                if !ss.profile.kind.tracks_conversation() {
+                    // Shell sessions (and agents whose conversations we can't resume) aren't kept between runs.
                     continue;
                 }
                 // Pick up profile changes (e.g. Claude now started directly).
@@ -618,6 +671,7 @@ impl App {
                     "images" => OptPage::Images,
                     "shortcuts" => OptPage::Shortcuts,
                     "snippets" => OptPage::Snippets,
+                    "scripts" => OptPage::Scripts,
                     "about" => OptPage::About,
                     _ => OptPage::Terminal,
                 });
@@ -999,6 +1053,8 @@ impl App {
             opts: t.sess.opts.clone(),
             cost: t.sess.cost.map(|c| c.usd),
             pin: t.pin,
+            archived: false,
+            used: now_secs(),
         };
         crate::dlog!("auto-close #{id} ({why}): {}", t.sess.display_name());
         let nid = self.next_id;
@@ -1014,6 +1070,7 @@ impl App {
     fn housekeeping(&mut self, ctx: &egui::Context) {
         crate::dlog::ENABLED.store(self.s.debug_logging, std::sync::atomic::Ordering::Relaxed);
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true)) && winsys::is_main_visible();
+        self.auto_archive();
 
         // Tray: needed for minimize-to-tray and for notifications.
         if self.s.minimize_to_tray || self.s.notifications {
@@ -1174,7 +1231,7 @@ impl App {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        self.s.sessions = self.sidebar_order().iter().filter_map(|id| self.tabs.iter().find(|t| t.sess.id == *id)).filter(|t| t.sess.profile.is_agent())
+        self.s.sessions = self.sidebar_order().iter().filter_map(|id| self.tabs.iter().find(|t| t.sess.id == *id)).filter(|t| t.sess.profile.kind.tracks_conversation())
             .map(|t| SavedSession {
                 project: t.project.clone(),
                 profile: t.sess.profile.clone(),
@@ -1185,6 +1242,8 @@ impl eframe::App for App {
                 opts: t.sess.opts.clone(),
                 cost: t.sess.cost.map(|c| c.usd),
                 pin: t.pin,
+                archived: false,
+                used: now_secs(),
             })
             .collect();
         // Listed sessions that weren't started this time stay in the list.
@@ -1235,7 +1294,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.confirm_remove_project.is_some() || self.snippets_open || self.scripts_open;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_remove_project.is_some() || self.snippets_open || self.scripts_open;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1315,6 +1374,7 @@ impl eframe::App for App {
         self.plugins_window(&ctx);
         self.mcp_servers_window(&ctx);
         self.clear_dialog(&ctx);
+        self.model_switch_dialog(&ctx);
         self.remove_project_dialog(&ctx);
         self.show_toast(&ctx);
     }

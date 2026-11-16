@@ -98,6 +98,10 @@ pub fn open_file(path: &Path, line: Option<u32>, col: Option<u32>, editor: &str,
             let cmd = custom.replace("{file}", &file).replace("{line}", &l.to_string()).replace("{col}", &c.to_string());
             std::process::Command::new("cmd.exe").arg("/c").raw_arg(cmd).creation_flags(CREATE_NO_WINDOW).spawn().map(|_| ()).map_err(|e| e.to_string())
         }
+        // Opening a script through its file association would run it: use Notepad.
+        _ if path.extension().and_then(|e| e.to_str()).is_some_and(|e| ["cmd", "bat", "ps1", "py", "vbs", "js", "sh"].iter().any(|x| e.eq_ignore_ascii_case(x))) => {
+            std::process::Command::new("notepad.exe").arg(&file).spawn().map(|_| ()).map_err(|e| e.to_string())
+        }
         _ => std::process::Command::new("explorer.exe").arg(&file).spawn().map(|_| ()).map_err(|e| e.to_string()),
     }
 }

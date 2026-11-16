@@ -1,4 +1,4 @@
-//! Agent CLIs (Claude Code, Codex) launched with command-line flags
+//! Agent CLIs (Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode, Kimi CLI) launched with command-line flags
 //! for unrestricted mode / model / effort / extra parameters, conversation ids for resuming,
 //! model catalogs for the "with settings" dialog, and session names read from transcripts.
 
@@ -14,6 +14,41 @@ pub enum Kind {
     Shell,
     Claude,
     Codex,
+    Gemini,
+    Qwen,
+    OpenCode,
+    Kimi,
+}
+
+impl Kind {
+    /// The other agent CLIs: (kind, menu name, executable).
+    pub const OTHER_AGENTS: [(Kind, &'static str, &'static str); 4] = [
+        (Kind::Gemini, "Gemini", "gemini"),
+        (Kind::Qwen, "Qwen", "qwen"),
+        (Kind::OpenCode, "OpenCode", "opencode"),
+        (Kind::Kimi, "Kimi", "kimi"),
+    ];
+
+    /// Claude / Codex: the app finds their conversations (resume, titles, cost, model).
+    /// The other agents run as plain terminal sessions.
+    pub fn tracks_conversation(self) -> bool {
+        matches!(self, Kind::Claude | Kind::Codex)
+    }
+
+    /// The flag that starts the agent without permission prompts, if it has one.
+    pub fn unrestricted_flag(self) -> Option<&'static str> {
+        match self {
+            Kind::Claude => Some("--dangerously-skip-permissions"),
+            Kind::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
+            Kind::Gemini | Kind::Qwen | Kind::Kimi => Some("--yolo"),
+            Kind::OpenCode | Kind::Shell => None,
+        }
+    }
+
+    /// Takes a reasoning effort setting (Claude `--effort`, Codex `model_reasoning_effort`).
+    pub fn has_effort(self) -> bool {
+        matches!(self, Kind::Claude | Kind::Codex)
+    }
 }
 
 /// Per-session launch settings (the "with settings" dialog), kept for Restart / resume.
@@ -82,8 +117,9 @@ fn strip_flag(params: &mut Vec<String>, flags: &[&str]) {
 /// When set, Claude sessions get `--append-system-prompt` describing AI Terminal's colour tags.
 pub static COLOR_TAG_PROMPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// When set, new Claude sessions (not resumed, not named at launch) are asked to name themselves
-/// after their first task with the `rename_session` MCP tool.
+/// When set, new agent sessions (not resumed, not named at launch) are asked to name themselves
+/// after their first task with the `rename_session` MCP tool. Claude gets it through
+/// `--append-system-prompt`, Codex through `-c developer_instructions=...`.
 pub static NAME_SESSION_PROMPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The naming instruction (see `NAME_SESSION_PROMPT`).
@@ -121,8 +157,28 @@ pub fn write_mcp_config() -> Option<PathBuf> {
     Some(path)
 }
 
-/// Arguments for a session (after the program's own base args). `session_key` identifies the
-/// session to AI Terminal's MCP server.
+/// The naming instruction goes only to a new conversation the user didn't name at launch.
+fn wants_naming(name_sessions: bool, name: &str, resume: Option<&str>) -> bool {
+    name_sessions && resume.is_none() && name.trim().is_empty()
+}
+
+/// A TOML basic string (for Codex `-c key=value`, whose value is parsed as TOML).
+fn toml_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The `--append-system-prompt` text for a Claude session: the colour-tag guide and/or the
 /// naming instruction (only for a new conversation the user didn't name at launch).
 fn appended_prompt(color_tags: bool, name_sessions: bool, name: &str, resume: Option<&str>) -> Option<String> {
@@ -130,7 +186,7 @@ fn appended_prompt(color_tags: bool, name_sessions: bool, name: &str, resume: Op
     if color_tags {
         parts.push(crate::colortags::PROMPT);
     }
-    if name_sessions && resume.is_none() && name.trim().is_empty() {
+    if wants_naming(name_sessions, name, resume) {
         parts.push(NAME_SESSION_TEXT);
     }
     (!parts.is_empty()).then(|| parts.join("
@@ -213,14 +269,36 @@ pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str
             if let Some(e) = opts.effort.as_deref().filter(|e| !e.is_empty()) {
                 a.extend(["-c".into(), format!("model_reasoning_effort=\"{e}\"")]);
             }
+            // The naming instruction, unless the user sets developer_instructions themselves.
+            let naming = NAME_SESSION_PROMPT.load(std::sync::atomic::Ordering::Relaxed);
+            if wants_naming(naming, name, resume) && !a.iter().any(|x| x.starts_with("developer_instructions")) {
+                a.extend(["-c".into(), format!("developer_instructions={}", toml_string(NAME_SESSION_TEXT))]);
+            }
             if resume.is_none() {
                 if let Some(p) = opts.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
                     a.extend(["--".into(), p.to_string()]);
                 }
             }
-            if resume.is_none() {
-                if let Some(p) = opts.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-                    a.extend(["--".into(), p.to_string()]);
+        }
+        Kind::Gemini | Kind::Qwen | Kind::OpenCode | Kind::Kimi => {
+            if let Some(f) = kind.unrestricted_flag().filter(|_| opts.unrestricted) {
+                if !params.iter().any(|p| p == f) {
+                    a.push(f.into());
+                }
+            }
+            if opts.model.is_some() {
+                strip_flag(&mut params, &["--model", "-m"]);
+            }
+            a.extend(params);
+            if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
+                a.extend(["--model".into(), m.to_string()]);
+            }
+            // First prompt (handoff): Gemini / Qwen run it and stay interactive.
+            if let Some(p) = opts.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+                match kind {
+                    Kind::Gemini | Kind::Qwen => a.extend(["--prompt-interactive".into(), p.to_string()]),
+                    Kind::OpenCode => a.extend(["--prompt".into(), p.to_string()]),
+                    _ => {}
                 }
             }
         }
@@ -244,6 +322,17 @@ pub struct Catalog {
     pub claude_models: Vec<ModelInfo>,
     pub claude_efforts: Vec<String>,
     pub codex_models: Vec<ModelInfo>,
+}
+
+impl Catalog {
+    /// The model list for an agent (only Claude and Codex report one).
+    pub fn models(&self, kind: Kind) -> &[ModelInfo] {
+        match kind {
+            Kind::Claude => &self.claude_models,
+            Kind::Codex => &self.codex_models,
+            _ => &[],
+        }
+    }
 }
 
 fn run_quiet(program: &str, args: &[&str]) -> Option<String> {
@@ -311,13 +400,36 @@ pub fn parse_codex_models(json: &str) -> Vec<ModelInfo> {
         .unwrap_or_default()
 }
 
+/// Claude Code's model aliases; each always points to the latest model of its family, so the
+/// list doesn't go stale. `claude --help` has no real model list (only examples in prose).
+const CLAUDE_ALIASES: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+
+/// The Claude model list: the built-in aliases, plus any other alias `claude --help` mentions.
+/// Full model names from the help text (e.g. `claude-sonnet-4-6`) are examples, not a list of
+/// what's current, so they're left out (they can still be typed as `--model` in CLI Parameters).
+pub fn claude_models(help_models: &[String], efforts: &[String]) -> Vec<ModelInfo> {
+    let mut ids: Vec<String> = CLAUDE_ALIASES.iter().map(|s| s.to_string()).collect();
+    for m in help_models {
+        let alias = !m.starts_with("claude-") && !m.chars().any(|c| c.is_ascii_digit()) && m != "default";
+        if alias && !ids.contains(m) {
+            ids.push(m.clone());
+        }
+    }
+    ids.into_iter()
+        .map(|id| {
+            let mut name: Vec<char> = id.chars().collect();
+            name[0] = name[0].to_ascii_uppercase();
+            ModelInfo { label: format!("{} (latest)", name.into_iter().collect::<String>()), id, efforts: efforts.to_vec(), default_effort: None }
+        })
+        .collect()
+}
+
 pub fn load_catalog(claude: Option<String>, codex: Option<String>) -> Catalog {
     let mut c = Catalog::default();
-    if let Some(help) = claude.and_then(|p| run_quiet(&p, &["--help"])) {
-        let (models, efforts) = parse_claude_help(&help);
-        c.claude_models = models.into_iter().map(|m| ModelInfo { label: m.clone(), id: m, efforts: efforts.clone(), default_effort: None }).collect();
-        c.claude_efforts = efforts;
-    }
+    // The aliases are listed even when `claude --help` can't be read.
+    let (models, efforts) = claude.and_then(|p| run_quiet(&p, &["--help"])).map(|h| parse_claude_help(&h)).unwrap_or_default();
+    c.claude_models = claude_models(&models, &efforts);
+    c.claude_efforts = efforts;
     if let Some(json) = codex.and_then(|p| run_quiet(&p, &["debug", "models"])) {
         c.codex_models = parse_codex_models(&json);
     }
@@ -528,6 +640,13 @@ mod tests {
     }
 
     #[test]
+    fn codex_instruction_is_valid_toml_string() {
+        assert_eq!(toml_string("a \"b\" c\\d\ne"), r#""a \"b\" c\\d\ne""#);
+        assert!(wants_naming(true, " ", None));
+        assert!(!wants_naming(true, "", Some("id")) && !wants_naming(true, "Fix", None) && !wants_naming(false, "", None));
+    }
+
+    #[test]
     fn params_split_and_flags() {
         assert_eq!(split_params(r#"--add-dir "C:\My Dir" -v"#), vec!["--add-dir", r"C:\My Dir", "-v"]);
         let o = LaunchOpts { unrestricted: false, model: Some("opus".into()), effort: Some("high".into()), cli_params: "--model sonnet --verbose".into(), one_m: true, initial_prompt: None };
@@ -536,6 +655,15 @@ mod tests {
         assert_eq!(build_args(Kind::Claude, &u, "", None, "k"), vec!["--dangerously-skip-permissions"]);
         let c = LaunchOpts { unrestricted: true, model: Some("gpt-x".into()), effort: Some("low".into()), ..Default::default() };
         assert_eq!(build_args(Kind::Codex, &c, "", Some("id1"), "k"), vec!["resume", "id1", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-x", "-c", "model_reasoning_effort=\"low\""]);
+        let g = LaunchOpts { unrestricted: true, model: Some("gemini-x".into()), cli_params: "-m old --debug".into(), initial_prompt: Some("hi".into()), ..Default::default() };
+        assert_eq!(build_args(Kind::Gemini, &g, "", None, "k"), vec!["--yolo", "--debug", "--model", "gemini-x", "--prompt-interactive", "hi"]);
+        assert_eq!(build_args(Kind::OpenCode, &g, "", None, "k"), vec!["--debug", "--model", "gemini-x", "--prompt", "hi"]);
+        // Codex handoff: the first prompt is passed once, and not when resuming.
+        let h = LaunchOpts { initial_prompt: Some("hi".into()), ..Default::default() };
+        let args = build_args(Kind::Codex, &h, "Named", None, "k");
+        assert_eq!(args.iter().filter(|x| *x == "hi").count(), 1);
+        assert_eq!(args[args.len() - 2..], ["--", "hi"]);
+        assert!(!build_args(Kind::Codex, &h, "Named", Some("id1"), "k").iter().any(|x| x == "hi"));
     }
 
     #[test]
@@ -544,5 +672,14 @@ mod tests {
         let (m, e) = parse_claude_help(help);
         assert_eq!(m, vec!["fable", "opus", "sonnet"]);
         assert_eq!(e, vec!["low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
+    fn claude_model_list() {
+        let help: Vec<String> = ["sonnet", "opus", "claude-sonnet-4-6", "mythos"].iter().map(|s| s.to_string()).collect();
+        let m = claude_models(&help, &[]);
+        let ids: Vec<&str> = m.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["fable", "opus", "sonnet", "haiku", "mythos"]);
+        assert_eq!(m[1].label, "Opus (latest)");
     }
 }

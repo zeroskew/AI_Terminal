@@ -2,20 +2,56 @@
 
 use super::*;
 
+/// The CLI's command name for the launch dialog ("claude", "gemini", ...).
+fn cli_name(p: &Profile) -> String {
+    let prog = if p.args.len() == 3 && p.args[0] == "/s" { &p.args[2] } else { &p.program };
+    prog.rsplit(['\\', '/']).next().unwrap_or(prog).trim_end_matches(".exe").to_lowercase()
+}
+
 impl App {
-    /// The New-session menu: per agent "New X session", "(unrestricted)",
+    /// The New-session menu: per agent "New X session", "(unrestricted)", "(model) ▸",
     /// "(with settings)", then "New Shell (…)" per shell.
     pub(super) fn new_session_menu(&mut self, ui: &mut Ui, ctx: &egui::Context, project: &Path) {
         ui.set_min_width(330.0);
         let profiles = self.profiles.clone();
+        let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let mut chosen: Option<(Profile, Option<bool>)> = None; // (profile, Some(unrestricted) | None = with settings)
+        let mut with_model: Option<(Profile, Option<String>)> = None; // (profile, model | None = CLI default)
+        let loading = self.catalog_loading();
+        let mut refresh = false;
         for p in profiles.iter().filter(|p| p.is_agent()) {
             let n = &p.name;
             if menu_item(ui, agent_icon(p), &format!("New {n} session")) {
                 chosen = Some((p.clone(), Some(false)));
             }
-            if menu_item(ui, agent_icon(p), &format!("New {n} session (unrestricted)")) {
+            if p.kind.unrestricted_flag().is_some() && menu_item(ui, agent_icon(p), &format!("New {n} session (unrestricted)")) {
                 chosen = Some((p.clone(), Some(true)));
+            }
+            let models = catalog.models(p.kind);
+            {
+                let row = menu_row(ui, agent_icon(p), &format!("New {n} session (model)"), true);
+                let current = self.last_opts(p.kind).model;
+                egui::containers::menu::SubMenu::new().show(ui, &row, |ui| {
+                    ui.set_min_width(220.0);
+                    let mut pick = |ui: &mut Ui, id: Option<String>, label: &str| {
+                        if ui.add(egui::Button::selectable(current == id, label)).clicked() {
+                            with_model = Some((p.clone(), id));
+                            ui.close();
+                        }
+                    };
+                    pick(ui, None, "Use CLI default");
+                    for m in models {
+                        pick(ui, Some(m.id.clone()), &m.label);
+                    }
+                    if models.is_empty() && !loading {
+                        ui.label(RichText::new("No model list (the CLI didn't report one)").size(12.0).color(TEXT_FAINT));
+                    }
+                    ui.separator();
+                    // Keeps the menu open so the new list shows up in place.
+                    if ui.add_enabled(!loading, egui::Button::new(if loading { "Refreshing models…" } else { "⟳ Refresh models" })).clicked() {
+                        refresh = true;
+                    }
+                });
             }
             if menu_item(ui, agent_icon(p), &format!("New {n} session (with settings)")) {
                 chosen = Some((p.clone(), None));
@@ -26,11 +62,31 @@ impl App {
                 chosen = Some((p.clone(), Some(false)));
             }
         }
+        if refresh {
+            self.refresh_catalog(ctx);
+        }
+        if let Some((p, model)) = with_model {
+            // One-off: the last settings with this model (not remembered as the default).
+            ui.close();
+            let mut opts = self.last_opts(p.kind);
+            opts.unrestricted = false;
+            if let Some(info) = model.as_ref().and_then(|m| catalog.models(p.kind).iter().find(|x| &x.id == m)) {
+                if opts.effort.as_ref().is_some_and(|e| !info.efforts.is_empty() && !info.efforts.contains(e)) {
+                    opts.effort = None;
+                }
+            }
+            if model.is_none() {
+                opts.one_m = false;
+            }
+            opts.model = model;
+            self.spawn_opts(ctx, project.to_path_buf(), p, String::new(), opts);
+            return;
+        }
         if let Some((p, mode)) = chosen {
             ui.close();
             match mode {
                 Some(unrestricted) => {
-                    let mut opts = if p.is_agent() { self.last_opts(p.kind).clone() } else { LaunchOpts::default() };
+                    let mut opts = if p.is_agent() { self.last_opts(p.kind) } else { LaunchOpts::default() };
                     opts.unrestricted = unrestricted && p.is_agent();
                     self.spawn_opts(ctx, project.to_path_buf(), p, String::new(), opts);
                 }
@@ -39,12 +95,35 @@ impl App {
         }
     }
 
+    /// Re-reads the model lists from the CLIs (`claude --help`, `codex debug models`) in the
+    /// background; the old list stays until the new one arrives.
+    pub(super) fn refresh_catalog(&self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        if self.catalog_loading.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let exe = |kind: Kind| self.profiles.iter().find(|p| p.kind == kind).map(|p| p.program.clone()).filter(|p| p.to_lowercase().ends_with(".exe") && !p.to_lowercase().ends_with("cmd.exe"));
+        let (claude, codex) = (exe(Kind::Claude), exe(Kind::Codex));
+        let (cat, loading, ctx) = (self.catalog.clone(), self.catalog_loading.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let c = agents::load_catalog(claude, codex);
+            *cat.lock().unwrap() = Some(c);
+            loading.store(false, Ordering::SeqCst);
+            ctx.request_repaint();
+        });
+    }
+
+    fn catalog_loading(&self) -> bool {
+        self.catalog_loading.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Last confirmed "with settings" values for an agent (the dialog starts from them; plain
     /// new sessions reuse model / effort / parameters but not unrestricted).
-    pub(super) fn last_opts(&self, kind: Kind) -> &LaunchOpts {
+    pub(super) fn last_opts(&self, kind: Kind) -> LaunchOpts {
         match kind {
-            Kind::Codex => &self.s.last_codex_opts,
-            _ => &self.s.last_claude_opts,
+            Kind::Codex => self.s.last_codex_opts.clone(),
+            Kind::Claude | Kind::Shell => self.s.last_claude_opts.clone(),
+            _ => self.s.last_agent_opts.get(&format!("{kind:?}")).cloned().unwrap_or_default(),
         }
     }
 
@@ -53,17 +132,20 @@ impl App {
             Some(t) => (t.sess.opts.clone(), t.sess.name.clone()),
             None => match restart.and_then(|id| self.dormant.iter().find(|d| d.id == id)) {
                 Some(d) => (d.saved.opts.clone(), d.saved.name.clone()),
-                None => (self.last_opts(profile.kind).clone(), String::new()),
+                None => (self.last_opts(profile.kind), String::new()),
             },
         };
         self.launch = Some(LaunchDialog { project, profile, name, opts, restart });
     }
 
     pub(super) fn launch_dialog(&mut self, ctx: &egui::Context) {
+        let loading = self.catalog_loading();
+        let mut refresh = false;
         let Some(d) = &mut self.launch else { return };
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let is_claude = d.profile.is_claude();
-        let models: Vec<agents::ModelInfo> = if is_claude { catalog.claude_models.clone() } else { catalog.codex_models.clone() };
+        let kind = d.profile.kind;
+        let models: Vec<agents::ModelInfo> = catalog.models(kind).to_vec();
         let mut result: Option<bool> = None;
         let history = self.s.cli_history.clone();
         let mut forget: Option<String> = None;
@@ -87,18 +169,35 @@ impl App {
                 ui.end_row();
 
                 ui.label(RichText::new("Model").color(TEXT));
-                let shown = d.opts.model.clone().map(|m| models.iter().find(|x| x.id == m).map(|x| x.label.clone()).unwrap_or(m)).unwrap_or_else(|| "Use CLI default".into());
-                egui::ComboBox::from_id_salt("launch_model").selected_text(shown).width(380.0).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut d.opts.model, None, "Use CLI default");
-                    for m in &models {
-                        ui.selectable_value(&mut d.opts.model, Some(m.id.clone()), &m.label);
+                if !kind.has_effort() {
+                    // These CLIs don't report a model list: type the id (OpenCode: provider/model).
+                    let mut m = d.opts.model.clone().unwrap_or_default();
+                    let hint = if kind == Kind::OpenCode { "CLI default (or provider/model, e.g. deepseek/deepseek-chat)" } else { "CLI default (or a model id)" };
+                    if ui.add(egui::TextEdit::singleline(&mut m).hint_text(hint).desired_width(380.0)).changed() {
+                        d.opts.model = Some(m.trim().to_string()).filter(|m| !m.is_empty());
                     }
-                    if let Some(saved) = d.opts.model.clone().filter(|m| !models.iter().any(|x| &x.id == m)) {
-                        ui.selectable_value(&mut d.opts.model, Some(saved.clone()), format!("{saved} (saved)"));
+                    ui.end_row();
+                } else {
+                let shown = d.opts.model.clone().map(|m| models.iter().find(|x| x.id == m).map(|x| x.label.clone()).unwrap_or(m)).unwrap_or_else(|| "Use CLI default".into());
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("launch_model").selected_text(shown).width(340.0).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.opts.model, None, "Use CLI default");
+                        for m in &models {
+                            ui.selectable_value(&mut d.opts.model, Some(m.id.clone()), &m.label);
+                        }
+                        if let Some(saved) = d.opts.model.clone().filter(|m| !models.iter().any(|x| &x.id == m)) {
+                            ui.selectable_value(&mut d.opts.model, Some(saved.clone()), format!("{saved} (saved)"));
+                        }
+                    });
+                    let tip = if loading { "Refreshing models…" } else { "Refresh the model list from the CLI" };
+                    if ui.add_enabled(!loading, egui::Button::new("⟳")).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                        refresh = true;
                     }
                 });
                 ui.end_row();
+                }
 
+                if kind.has_effort() {
                 ui.label(RichText::new("Effort").color(TEXT));
                 let sel_model = d.opts.model.as_ref().and_then(|m| models.iter().find(|x| &x.id == m));
                 let mut levels: Vec<String> = match sel_model {
@@ -130,6 +229,7 @@ impl App {
                     }
                 });
                 ui.end_row();
+                }
 
                 ui.label(RichText::new("CLI Parameters").color(TEXT));
                 ui.horizontal(|ui| {
@@ -151,16 +251,17 @@ impl App {
                 });
                 ui.end_row();
                 ui.label("");
-                ui.label(RichText::new(format!("Extra parameters passed to {}. Model and effort are appended when launching.", if is_claude { "claude" } else { "codex" })).size(12.0).color(TEXT_FAINT));
+                ui.label(RichText::new(format!("Extra parameters passed to {}. Model and effort are appended when launching.", cli_name(&d.profile))).size(12.0).color(TEXT_FAINT));
                 ui.end_row();
             });
             ui.add_space(6.0);
             if is_claude {
                 ui.add_enabled(d.opts.model.is_some(), egui::Checkbox::new(&mut d.opts.one_m, "1M context")).on_disabled_hover_text("Pick a model first");
             }
-            let flag = if is_claude { "--dangerously-skip-permissions" } else { "--dangerously-bypass-approvals-and-sandbox" };
-            ui.checkbox(&mut d.opts.unrestricted, "Unrestricted mode").on_hover_text(format!("Starts with {flag}: the agent runs commands and edits files without asking."));
-            if models.is_empty() {
+            if let Some(flag) = kind.unrestricted_flag() {
+                ui.checkbox(&mut d.opts.unrestricted, "Unrestricted mode").on_hover_text(format!("Starts with {flag}: the agent runs commands and edits files without asking."));
+            }
+            if models.is_empty() && kind.has_effort() {
                 ui.label(RichText::new("No model list was found (the CLI didn't report one); you can still type --model in CLI Parameters.").size(12.0).color(ORANGE));
             }
             ui.add_space(14.0);
@@ -182,6 +283,9 @@ impl App {
                 result = Some(true);
             }
         });
+        if refresh {
+            self.refresh_catalog(ctx);
+        }
         if let Some(h) = forget {
             self.s.cli_history.retain(|x| *x != h);
         }
@@ -207,9 +311,13 @@ impl App {
             self.s.cli_history.insert(0, p);
             self.s.cli_history.truncate(12);
         }
+        let keep = LaunchOpts { unrestricted: false, ..opts.clone() };
         match d.profile.kind {
-            Kind::Codex => self.s.last_codex_opts = LaunchOpts { unrestricted: false, ..opts.clone() },
-            _ => self.s.last_claude_opts = LaunchOpts { unrestricted: false, ..opts.clone() },
+            Kind::Codex => self.s.last_codex_opts = keep,
+            Kind::Claude | Kind::Shell => self.s.last_claude_opts = keep,
+            k => {
+                self.s.last_agent_opts.insert(format!("{k:?}"), keep);
+            }
         }
         match d.restart {
             Some(id) if self.dormant.iter().any(|x| x.id == id) => {

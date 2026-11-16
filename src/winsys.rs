@@ -264,6 +264,46 @@ mod imp {
         Ok(())
     }
 
+    // ---- installed Store packages ------------------------------------------------------------------
+
+    /// The install folder of the current user's Store package whose full name starts with
+    /// `prefix` (e.g. "OpenAI.Codex_"); the folder under WindowsApps can't be listed.
+    pub fn package_root(prefix: &str) -> Option<std::path::PathBuf> {
+        const PACKAGES: PCWSTR = w!("Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\Repository\\Packages");
+        unsafe {
+            let mut key = HKEY::default();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, PACKAGES, None, KEY_READ, &mut key).is_err() {
+                return None;
+            }
+            let mut found: Option<(String, std::path::PathBuf)> = None;
+            let mut i = 0u32;
+            loop {
+                let mut name = [0u16; 512];
+                let mut len = name.len() as u32;
+                if RegEnumKeyExW(key, i, Some(windows::core::PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None).is_err() {
+                    break;
+                }
+                i += 1;
+                let full = String::from_utf16_lossy(&name[..len as usize]);
+                if !full.starts_with(prefix) {
+                    continue;
+                }
+                let sub: Vec<u16> = full.encode_utf16().chain([0]).collect();
+                let mut buf = [0u16; 1024];
+                let mut size = (buf.len() * 2) as u32;
+                if RegGetValueW(key, PCWSTR(sub.as_ptr()), w!("PackageRootFolder"), RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut size)).is_ok() {
+                    let root = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..(size as usize / 2).saturating_sub(1)]));
+                    // Several versions can be registered for a moment during an update: take the newest.
+                    if root.is_dir() && found.as_ref().is_none_or(|(n, _)| full > *n) {
+                        found = Some((full, root));
+                    }
+                }
+            }
+            let _ = RegCloseKey(key);
+            found.map(|f| f.1)
+        }
+    }
+
     // ---- memory ----------------------------------------------------------------------------------
 
     /// Memory in use on the machine, in GB.
@@ -348,4 +388,16 @@ pub fn badge_rgba(count: Option<usize>, bg: [u8; 3], fg: [u8; 3]) -> (Vec<u8>, i
         }
     }
     (px, s)
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn package_root_is_a_folder_when_found() {
+        if let Some(root) = super::package_root("OpenAI.Codex_") {
+            eprintln!("Codex package: {}", root.display());
+            assert!(root.is_dir());
+        }
+        assert!(super::package_root("No.Such.Package_").is_none());
+    }
 }

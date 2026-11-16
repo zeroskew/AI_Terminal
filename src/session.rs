@@ -95,7 +95,7 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// Profiles: Claude and Codex (when installed), then the shells
+    /// Profiles: Claude, Codex and the other agent CLIs (when installed), then the shells
     /// pwsh (if on PATH), powershell and cmd. An executable that isn't an .exe (an npm .cmd
     /// shim) is started through `cmd /s /c`.
     pub fn detect() -> Vec<Profile> {
@@ -108,7 +108,14 @@ impl Profile {
         };
         let mut v: Vec<Profile> = Vec::new();
         v.extend(agent(CLAUDE, "claude", Kind::Claude));
-        v.extend(agent(CODEX, "codex", Kind::Codex));
+        v.extend(agent(CODEX, "codex", Kind::Codex).or_else(|| {
+            // The Codex desktop app (Microsoft Store) bundles the CLI.
+            let exe = crate::winsys::package_root("OpenAI.Codex_")?.join("app").join("resources").join("codex.exe");
+            exe.is_file().then(|| Profile { name: CODEX.into(), program: exe.display().to_string(), args: vec![], kind: Kind::Codex })
+        }));
+        for (kind, name, exe) in Kind::OTHER_AGENTS {
+            v.extend(agent(name, exe, kind));
+        }
         if let Some(p) = find_on_path("pwsh.exe") {
             v.push(Profile { name: "pwsh".into(), program: p.display().to_string(), args: vec![], kind: Kind::Shell });
         }
@@ -133,6 +140,8 @@ impl Profile {
                 self.kind = Kind::Claude;
             } else if n.contains("codex") {
                 self.kind = Kind::Codex;
+            } else if let Some((k, ..)) = Kind::OTHER_AGENTS.iter().find(|(_, name, _)| n == name.to_lowercase()) {
+                self.kind = *k;
             }
         }
     }
@@ -149,7 +158,7 @@ fn extra_agent_dirs(exe: &str) -> Vec<PathBuf> {
         if exe == "claude" {
             v.push(l.join("AnthropicClaude").join(&file));
             v.push(l.join("Programs").join("AnthropicClaude").join(&file));
-        } else {
+        } else if exe == "codex" {
             v.push(l.join("Programs").join("OpenAI").join("Codex").join("bin").join(&file));
         }
     }
@@ -196,6 +205,8 @@ pub struct Session {
     last_title_scan: Option<std::time::Instant>,
     /// Estimated cost / tokens so far (from the transcript), refreshed every 5 s.
     pub cost: Option<crate::cost::Summary>,
+    /// The model answering, from the latest reply in the transcript (e.g. "claude-opus-5-5").
+    pub model: Option<String>,
     cost_tracker: crate::cost::Tracker,
     /// Identifies this session in hook events (the AI_TERMINAL_SESSION variable).
     pub hook_key: String,
@@ -277,6 +288,7 @@ impl Session {
             last_title_scan: None,
             hook_key,
             cost: None,
+            model: None,
             cost_tracker: Default::default(),
             attention: None,
             busy: false,
@@ -295,6 +307,7 @@ impl Session {
         self.agent_id = Some(id.to_string());
         self.transcript_title = None;
         self.cost = None;
+        self.model = None;
         self.cost_tracker = Default::default();
         self.last_title_scan = None;
     }
@@ -311,7 +324,7 @@ impl Session {
             self.agent_id = match self.profile.kind {
                 Kind::Claude => crate::agents::find_claude_id(&self.cwd, self.spawned_at, claimed),
                 Kind::Codex => crate::agents::find_codex_id(&self.cwd, self.spawned_at, claimed),
-                Kind::Shell => None,
+                _ => None,
             };
         }
         if let Some(id) = self.agent_id.clone() {
@@ -330,6 +343,11 @@ impl Session {
                 };
                 if c.usage.total() > 0 {
                     self.cost = Some(c);
+                }
+                if let Some(m) = self.cost_tracker.model() {
+                    if self.model.as_deref() != Some(m) {
+                        self.model = Some(m.to_string());
+                    }
                 }
             }
         }
@@ -431,7 +449,7 @@ impl Session {
         if let Some(t) = &self.transcript_title {
             return t.clone();
         }
-        if self.profile.is_agent() {
+        if self.profile.kind.tracks_conversation() {
             return "New session".into();
         }
         match self.title.as_deref().map(str::trim) {

@@ -8,9 +8,58 @@ impl App {
         self.tabs.iter().filter(|t| t.project == p).map(|t| t.sess.id).collect()
     }
 
-    /// Running + listed (not running) sessions of a project.
+    /// Running + listed (not running, not archived) sessions of a project.
     pub(super) fn project_session_count(&self, p: &Path) -> usize {
-        self.project_sessions(p).len() + self.dormant.iter().filter(|d| d.saved.project == p).count()
+        self.project_sessions(p).len() + self.dormant.iter().filter(|d| d.saved.project == p && !d.saved.archived).count()
+    }
+
+    /// "Keep the last N sessions": per project, listed sessions past the N most recently used
+    /// move to Archived. Running and pinned sessions are never archived (running ones count
+    /// towards N).
+    pub(super) fn auto_archive(&mut self) {
+        let keep = self.s.keep_sessions as usize;
+        if keep == 0 {
+            return;
+        }
+        for p in self.s.projects.iter().map(|p| p.path.clone()).collect::<Vec<_>>() {
+            let running = self.tabs.iter().filter(|t| t.project == p && t.pin == 0).count();
+            let mut listed: Vec<(u64, usize)> = self
+                .dormant
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.saved.project == p && !d.saved.archived && d.saved.pin == 0)
+                .map(|(i, d)| (d.saved.used.max(d.saved.created), i))
+                .collect();
+            if running + listed.len() <= keep {
+                continue;
+            }
+            listed.sort_by(|a, b| b.cmp(a));
+            for &(_, i) in listed.iter().skip(keep.saturating_sub(running)) {
+                self.dormant[i].saved.archived = true;
+            }
+        }
+    }
+
+    /// Moves a session to Archived (a running one is closed first; it stays resumable).
+    pub(super) fn archive(&mut self, id: u64) {
+        if self.tabs.iter().any(|t| t.sess.id == id) {
+            self.park(id, "archived");
+            if let Some(d) = self.dormant.last_mut() {
+                d.saved.archived = true;
+                d.saved.pin = 0;
+            }
+        } else if let Some(d) = self.dormant.iter_mut().find(|d| d.id == id) {
+            d.saved.archived = true;
+            d.saved.pin = 0;
+        }
+    }
+
+    /// Back from Archived into the list (counts as just used, so the limit keeps it).
+    pub(super) fn unarchive(&mut self, id: u64) {
+        if let Some(d) = self.dormant.iter_mut().find(|d| d.id == id) {
+            d.saved.archived = false;
+            d.saved.used = now_secs();
+        }
     }
 
     /// The usage shown on a session's row: its share of the 5-hour plan limit, or its
@@ -48,6 +97,7 @@ impl App {
             cost: t.sess.cost.map(|c| c.usd),
             plan: t.sess.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).map(|p| p.five_hour),
             pin: t.pin,
+            archived: false,
             })
             .collect();
         v.extend(self.dormant.iter().filter(|d| d.saved.project == p).map(|d| Row {
@@ -67,10 +117,18 @@ impl App {
             cost: d.saved.cost,
             plan: d.saved.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).map(|p| p.five_hour),
             pin: d.saved.pin,
+            archived: d.saved.archived,
         }));
-        // Newest first.
-        // Pinned first (in their order), then newest first.
-        v.sort_by(|a, b| (a.pin == 0, a.pin).cmp(&(b.pin == 0, b.pin)).then_with(|| (b.created, b.id).cmp(&(a.created, a.id))));
+        let on_top = self.s.active_on_top;
+        // Pinned first (in their order), then the active (running) ones if set, then the rest;
+        // newest first within each; archived ones last.
+        v.sort_by(|a, b| {
+            a.archived
+                .cmp(&b.archived)
+                .then_with(|| (a.pin == 0, a.pin).cmp(&(b.pin == 0, b.pin)))
+                .then_with(|| if on_top { (!a.is_active()).cmp(&!b.is_active()) } else { std::cmp::Ordering::Equal })
+                .then_with(|| (b.created, b.id).cmp(&(a.created, a.id)))
+        });
         v
     }
 
@@ -110,14 +168,13 @@ impl App {
         }
     }
 
-    /// Confirmation for removing a project: what it does (and doesn't) before it happens.
+    /// Confirmation for removing a project (from the app only; files stay on disk).
     pub(super) fn remove_project_dialog(&mut self, ctx: &egui::Context) {
         let Some(path) = self.confirm_remove_project.clone() else { return };
         let Some(name) = self.s.projects.iter().find(|p| p.path == path).map(|p| p.name.clone()) else {
             self.confirm_remove_project = None;
             return;
         };
-        let n = self.project_session_count(&path);
         let running = self.project_sessions(&path).len();
         let mut choice: Option<bool> = None;
         let m = egui::Modal::new(egui::Id::unique("confirm_remove_project")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(20)).show(ctx, |ui| {
@@ -126,25 +183,11 @@ impl App {
             ui.add_space(2.0);
             ui.label(RichText::new(path.display().to_string()).size(12.0).color(TEXT_FAINT));
             ui.add_space(12.0);
-            let point = |ui: &mut Ui, head: &str, body: &str, col: Color32| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.label(RichText::new("•").color(col));
-                    ui.label(RichText::new(head).family(bold()).color(col));
-                    ui.label(RichText::new(body).color(TEXT));
-                });
-                ui.add_space(4.0);
-            };
-            point(ui, "Removed:", "only this app's reference to the folder: its card on Home, its tab and its sessions list.", ORANGE);
+            ui.label(RichText::new("The project is removed from this list only. Nothing is deleted from disk: the folder and all its files stay as they are.").color(TEXT));
             if running > 0 {
-                point(ui, "Closed:", &format!("{running} running session{} in this project.", if running == 1 { "" } else { "s" }), ORANGE);
+                ui.add_space(6.0);
+                ui.label(RichText::new(format!("Its {running} running session{} will be closed.", if running == 1 { "" } else { "s" })).color(ORANGE));
             }
-            point(ui, "Not deleted:", "the folder and every file in it stay on disk, untouched.", GREEN);
-            if n > 0 {
-                point(ui, "Kept:", "Claude / Codex conversations stay in their own history; add the folder again and resume them with /resume.", GREEN);
-            }
-            ui.add_space(8.0);
-            ui.label(RichText::new("To just take it off the tab bar, untick \"Show in tabs\" instead.").color(TEXT_FAINT).size(12.5));
             ui.add_space(14.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("Remove").color(Color32::WHITE)).fill(RED).min_size(Vec2::new(80.0, 28.0))).clicked() {
@@ -220,6 +263,7 @@ impl App {
         ui.add_space(12.0);
 
         let rows = self.rows(&project);
+        let archived = rows.iter().filter(|r| r.archived).count();
         ui.horizontal(|ui| {
             ui.label(RichText::new("SESSIONS").size(11.0).family(bold()).color(TEXT_DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -229,7 +273,7 @@ impl App {
                 if widgets::icon_button(ui, Icon::Plugin, 24.0, TEXT_DIM, "Claude Code plugins").clicked() {
                     self.open_plugins();
                 }
-                let n = rows.len();
+                let n = rows.len() - archived;
                 ui.label(RichText::new(format!("{n} session{}", if n == 1 { "" } else { "s" })).size(11.5).color(TEXT_FAINT));
             });
         });
@@ -245,6 +289,10 @@ impl App {
         let mut mode_req: Option<(u64, bool)> = None;
         let mut pin_req: Option<(u64, bool)> = None;
         let mut settings_req: Option<u64> = None;
+        let mut archive_req: Option<(u64, bool)> = None;
+        let mut toggle_archived = false;
+        // While filtering, matching archived sessions show too.
+        let show_archived = self.show_archived || !filter.is_empty();
         let today = local_day(now_secs());
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let mut last_group: Option<String> = None;
@@ -255,10 +303,17 @@ impl App {
                 if !filter.is_empty() && !name.to_lowercase().contains(&filter) && !row.profile.name.to_lowercase().contains(&filter) {
                     continue;
                 }
-                let group = if row.pin > 0 { "Pinned".to_string() } else { day_label(today, local_day(row.created)) };
+                if row.archived && !show_archived {
+                    continue;
+                }
+                let group = if row.archived { "Archived".to_string() } else if row.pin > 0 { "Pinned".to_string() } else if self.s.active_on_top && row.is_active() { "Active".to_string() } else { day_label(today, local_day(row.created)) };
                 if last_group.as_ref() != Some(&group) {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(group.to_uppercase()).size(10.5).family(bold()).color(TEXT_FAINT));
+                    if row.archived {
+                        toggle_archived |= archived_header(ui, archived, true);
+                    } else {
+                        ui.label(RichText::new(group.to_uppercase()).size(10.5).family(bold()).color(TEXT_FAINT));
+                    }
                     last_group = Some(group);
                 }
                 let selected = self.active == Some(id);
@@ -338,7 +393,7 @@ impl App {
                         close_req = Some(id);
                         x_clicked = true;
                     }
-                    close_resp.on_hover_text("Close session");
+                    close_resp.on_hover_text(if row.archived { "Delete from the archive" } else { "Close session" });
                 } else if let Some(label) = status_label(&row) {
                     p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.5), ACCENT_HI);
                 } else {
@@ -364,7 +419,9 @@ impl App {
                     self.renaming = Some((id, name.clone()));
                     self.rename_focus = true;
                 }
-                let state = if !row.live {
+                let state = if row.archived {
+                    "\nArchived — click to resume".to_string()
+                } else if !row.live {
                     if row.resumable { "\nNot running — click to resume the conversation".to_string() } else { "\nNot running — click to start".to_string() }
                 } else {
                     row.exited.map(|c| format!("\nExited with code {c}")).unwrap_or_default()
@@ -378,6 +435,7 @@ impl App {
                 let detail = format!("{}{}{}{now}", row.profile.name, if row.unrestricted { " · unrestricted" } else { "" }, state);
                 let (live, resumable, unrestricted, agent) = (row.live, row.resumable, row.unrestricted, row.profile.is_agent());
                 let pinned = row.pin > 0;
+                let is_archived = row.archived;
                 let tip_name = name.clone();
                 resp.on_hover_ui(|ui| {
                     ui.label(RichText::new(tip_name).family(bold()).color(TEXT));
@@ -389,8 +447,12 @@ impl App {
                         self.rename_focus = true;
                         ui.close();
                     }
-                    if ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
+                    if !is_archived && ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
                         pin_req = Some((id, !pinned));
+                        ui.close();
+                    }
+                    if ui.button(if is_archived { "Restore to list" } else { "Archive" }).clicked() {
+                        archive_req = Some((id, !is_archived));
                         ui.close();
                     }
                     let label = if !live || resumable { "Resume" } else { "Restart" };
@@ -418,7 +480,7 @@ impl App {
                             ui.close();
                         }
                     }
-                    if ui.button("Close").clicked() {
+                    if ui.button(if is_archived { "Delete" } else { "Close" }).clicked() {
                         close_req = Some(id);
                         ui.close();
                     }
@@ -460,9 +522,13 @@ impl App {
                     }
                 }
             }
-            if rows.is_empty() {
+            if archived > 0 && !show_archived {
+                ui.add_space(4.0);
+                toggle_archived |= archived_header(ui, archived, false);
+            }
+            if rows.len() == archived {
                 ui.add_space(10.0);
-                ui.label(RichText::new("No sessions yet.").color(TEXT_FAINT));
+                ui.label(RichText::new(if archived > 0 { "No sessions in the list." } else { "No sessions yet." }).color(TEXT_FAINT));
             }
             // Dragging a pinned session: a marker where it will go; dropping reorders.
             if let Some(dragged) = self.drag_session {
@@ -491,6 +557,16 @@ impl App {
                 }
             }
         });
+        if toggle_archived && filter.is_empty() {
+            self.show_archived = !self.show_archived;
+        }
+        if let Some((id, on)) = archive_req {
+            if on {
+                self.archive(id);
+            } else {
+                self.unarchive(id);
+            }
+        }
         if let Some(id) = select_req {
             self.select_session(id);
         }
@@ -529,4 +605,20 @@ impl App {
             self.restart(&ctx, id);
         }
     }
+}
+
+/// The Archived group's header: "ARCHIVED (n)" with an arrow; click to expand / collapse.
+fn archived_header(ui: &mut Ui, n: usize, open: bool) -> bool {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
+    let col = if resp.hovered() { TEXT } else { TEXT_FAINT };
+    let a = egui::Rect::from_center_size(egui::pos2(r.left() + 5.0, r.center().y), Vec2::splat(8.0));
+    let pts = if open {
+        vec![a.left_top(), a.right_top(), egui::pos2(a.center().x, a.bottom())]
+    } else {
+        vec![a.left_top(), egui::pos2(a.right(), a.center().y), a.left_bottom()]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
+    ui.painter().text(egui::pos2(r.left() + 15.0, r.center().y), egui::Align2::LEFT_CENTER, format!("ARCHIVED ({n})"), egui::FontId::new(10.5, bold()), col);
+    resp.on_hover_text(if open { "Hide archived sessions" } else { "Show archived sessions" }).clicked()
 }
