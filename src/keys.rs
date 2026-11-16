@@ -23,10 +23,12 @@ pub enum Cmd {
     Find,
     Snippets,
     Scripts,
+    SearchSessions,
 }
 
-pub const ALL: [Cmd; 18] = [
+pub const ALL: [Cmd; 19] = [
     Cmd::Find,
+    Cmd::SearchSessions,
     Cmd::Snippets,
     Cmd::Scripts,
     Cmd::NewClaude,
@@ -68,6 +70,7 @@ impl Cmd {
             Cmd::Find => "terminal.find",
             Cmd::Snippets => "snippets.palette",
             Cmd::Scripts => "scripts.palette",
+            Cmd::SearchSessions => "sessions.search",
         }
     }
 
@@ -91,6 +94,7 @@ impl Cmd {
             Cmd::Find => "Find in terminal",
             Cmd::Snippets => "Insert a snippet",
             Cmd::Scripts => "Run a script",
+            Cmd::SearchSessions => "Search session messages",
         }
     }
 
@@ -116,6 +120,7 @@ impl Cmd {
             Cmd::Find => KeyboardShortcut::new(cs, Key::F),
             Cmd::Snippets => KeyboardShortcut::new(cs, Key::S),
             Cmd::Scripts => KeyboardShortcut::new(cs, Key::R),
+            Cmd::SearchSessions => KeyboardShortcut::new(Modifiers::CTRL | Modifiers::ALT, Key::F),
         })
     }
 }

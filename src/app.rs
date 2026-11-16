@@ -32,6 +32,7 @@ mod topbar;
 mod pages;
 mod status_bar;
 mod viewer;
+mod search_ui;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Project {
@@ -277,6 +278,9 @@ pub struct Settings {
     pub script_auto_dismiss: bool,
     /// Script panel width and output height, once resized (None = default, output fits its text).
     pub script_panel_size: Option<[f32; 2]>,
+    /// Search window: every session (else the current one), and how many days back (0 = all).
+    pub search_all: bool,
+    pub search_days: u32,
     /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
     /// files, so it reads as 0 there (not the struct default).
     #[serde(default)]
@@ -338,6 +342,8 @@ impl Default for Settings {
             active_on_top: true,
             script_auto_dismiss: true,
             script_panel_size: None,
+            search_all: true,
+            search_days: 0,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
                 Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
@@ -542,6 +548,8 @@ pub struct App {
     hex_edit: std::collections::HashMap<String, String>,
     /// The sidebar's Archived group is expanded.
     show_archived: bool,
+    /// The Search window (open while Some).
+    search_ui: Option<search_ui::SearchUi>,
 }
 
 fn project_name(p: &Path) -> String {
@@ -662,6 +670,7 @@ impl App {
             catalog_loading: Default::default(),
             hex_edit: Default::default(),
             show_archived: false,
+            search_ui: None,
         };
         let ctx = cc.egui_ctx.clone();
         // MCP server for the sessions (tools to work with AI Terminal itself).
@@ -699,7 +708,9 @@ impl App {
                 if let Some(id) = &ss.agent_id {
                     let t = match ss.profile.kind {
                         Kind::Claude => agents::claude_title(&ss.project, id),
-                        _ => agents::codex_title(id),
+                        Kind::Codex => agents::codex_title(id),
+                        Kind::Antigravity => agents::agy_title(id),
+                        _ => None,
                     };
                     if t.is_some() {
                         ss.title = t;
@@ -773,6 +784,15 @@ impl App {
         }
         if args.iter().any(|a| a == "--scripts") {
             app.open_scripts();
+        }
+        for w in args.windows(2) {
+            if w[0] == "--search" {
+                app.open_search();
+                if let Some(st) = app.search_ui.as_mut() {
+                    st.set_query(&w[1]);
+                }
+                app.run_search(&ctx);
+            }
         }
         if args.iter().any(|a| a == "--plugins") {
             app.open_plugins();
@@ -1096,6 +1116,7 @@ impl App {
                 }
             }
             Scripts => self.open_scripts(),
+            SearchSessions => self.open_search(),
             Find => {
                 if let Some(t) = self.active_tab_mut() {
                     t.view.search.open();
@@ -1455,6 +1476,7 @@ impl eframe::App for App {
         self.script_runs_ui(&ctx);
         self.plugins_window(&ctx);
         self.mcp_servers_window(&ctx);
+        self.search_window(&ctx);
         self.clear_dialog(&ctx);
         self.model_switch_dialog(&ctx);
         self.remove_project_dialog(&ctx);

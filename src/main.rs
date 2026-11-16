@@ -17,6 +17,7 @@ mod mcp;
 mod mcp_servers;
 mod mcp_tools;
 mod plugins;
+mod search;
 mod session;
 mod term_theme;
 mod theme;
