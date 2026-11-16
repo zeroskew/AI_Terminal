@@ -186,9 +186,12 @@ pub(crate) fn refresh_path() {
                 added = true;
             }
         }
+        // set_var panics on a NUL; never let a bad entry take the app down.
         if added {
             if let Ok(p) = std::env::join_paths(cur) {
-                std::env::set_var("PATH", p);
+                if !p.to_string_lossy().contains('\0') {
+                    std::env::set_var("PATH", p);
+                }
             }
         }
     }

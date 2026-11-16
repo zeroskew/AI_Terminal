@@ -16,9 +16,15 @@ use std::time::{Duration, Instant};
 pub const VERSION: &str = env!("AI_TERMINAL_VERSION");
 const REPO: &str = "zeroskew/AI_Terminal";
 const RELAUNCHER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/relauncher.exe"));
-/// Automatic checks: the first one this long after start-up, then this often.
+/// The start-up check runs this long after start-up (the app settles first).
 const FIRST_CHECK: Duration = Duration::from_secs(20);
-const RECHECK: Duration = Duration::from_secs(6 * 3600);
+
+/// When automatic checks run (Options > General > Updates).
+pub struct Schedule {
+    pub on_startup: bool,
+    /// Every this many minutes (counted from start-up, then from the last automatic check).
+    pub every_min: Option<u32>,
+}
 
 #[derive(Clone, PartialEq)]
 pub enum Status {
@@ -109,20 +115,32 @@ pub fn init() {
 }
 
 /// Called every frame: starts an automatic check when one is due.
-pub fn auto_check(ctx: &egui::Context, enabled: bool) {
+pub fn auto_check(ctx: &egui::Context, enabled: bool, schedule: &Schedule) {
     if !enabled || is_dev_build() || BUSY.load(Ordering::Relaxed) || READY.lock().unwrap().is_some() {
         return;
     }
-    if ctx.input(|i| i.time) < FIRST_CHECK.as_secs_f64() {
-        return;
-    }
+    let every = schedule.every_min.map(|m| Duration::from_secs(m.max(1) as u64 * 60));
     let mut last = LAST_AUTO.lock().unwrap();
-    if last.is_some_and(|t| t.elapsed() < RECHECK) {
-        return;
+    // How long until the next automatic check (zero = due now; None = none planned).
+    let wait = match *last {
+        Some(t) => every.map(|e| e.saturating_sub(t.elapsed())),
+        None => {
+            let up = Duration::from_secs_f64(ctx.input(|i| i.time).max(0.0));
+            let startup = schedule.on_startup.then(|| FIRST_CHECK.saturating_sub(up));
+            let periodic = every.map(|e| e.saturating_sub(up));
+            startup.into_iter().chain(periodic).min()
+        }
+    };
+    match wait {
+        Some(w) if w.is_zero() => {
+            *last = Some(Instant::now());
+            drop(last);
+            check(ctx);
+        }
+        // Wake up for it even if nothing else repaints by then.
+        Some(w) => ctx.request_repaint_after(w),
+        None => {}
     }
-    *last = Some(Instant::now());
-    drop(last);
-    check(ctx);
 }
 
 /// Checks for (and downloads) a newer release on a thread. Nothing if one is running or an update

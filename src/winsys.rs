@@ -319,7 +319,10 @@ mod imp {
                 let mut buf = vec![0u16; size as usize / 2 + 1];
                 let mut size = (buf.len() * 2) as u32;
                 RegGetValueW(root, sub, w!("Path"), flags, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut size)).ok().ok()?;
-                let n = (size as usize / 2).saturating_sub(1).min(buf.len());
+                // With expansion, the returned size can exceed the expanded string (it may be the
+                // raw value's size), leaving stale data after the terminator: stop at the first NUL.
+                let n = (size as usize / 2).min(buf.len());
+                let n = buf[..n].iter().position(|&c| c == 0).unwrap_or(n);
                 Some(String::from_utf16_lossy(&buf[..n]))
             }
         };
