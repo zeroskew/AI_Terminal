@@ -27,6 +27,7 @@ mod mcp_api;
 mod launch;
 mod model_switch;
 mod session_close;
+mod context_info;
 mod mcp_servers_ui;
 mod sidebar;
 mod topbar;
@@ -532,6 +533,8 @@ pub struct App {
     model_switch: Option<model_switch::ModelSwitch>,
     /// The sidebar's Close (of a working session) / Delete asks first.
     confirm_close: Option<session_close::ConfirmClose>,
+    /// The session whose context details window (from the context pill) is open.
+    context_info: Option<context_info::ContextInfo>,
     /// Home's "Remove" on a project asks first: the project it's for.
     confirm_remove_project: Option<PathBuf>,
     /// Closing the window while sessions are working asks first.
@@ -699,6 +702,7 @@ impl App {
             confirm_clear: None,
             model_switch: None,
             confirm_close: None,
+            context_info: None,
             confirm_remove_project: None,
             confirm_quit: false,
             quit_confirmed: false,
@@ -1503,7 +1507,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1588,6 +1592,7 @@ impl eframe::App for App {
         self.clear_dialog(&ctx);
         self.model_switch_dialog(&ctx);
         self.confirm_close_dialog(&ctx);
+        self.context_info_dialog(&ctx);
         self.remove_project_dialog(&ctx);
         self.quit_dialog(&ctx);
         self.update_dialog(&ctx);

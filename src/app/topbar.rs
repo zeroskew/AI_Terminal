@@ -288,7 +288,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let mut open: Option<PathBuf> = None;
         let mut restart = false;
-        let mut compact = false;
+        let mut show_context = false;
         let mut change_model = false;
         // Claude and Codex both have /model and /compact.
         let is_codex = tab.sess.profile.kind == Kind::Codex;
@@ -319,45 +319,28 @@ impl App {
                 widgets::pill(ui, if m.to_lowercase().contains("permission") { "needs permission" } else { "needs you" }, Color32::WHITE, ACCENT).on_hover_text(m);
             }
             if let Some(c) = cost_pill {
-                let u = c.usage;
                 // Plan mode: the share of the plan limits (once Claude has reported one); the
                 // tokens either way.
-                let (head, about) = match plan_pill {
-                    Some(Some(p)) => (
-                        format!("5h {} · week {} · ", fmt_plan(p.five_hour), fmt_plan(p.seven_day)),
-                        format!(
-                            "Plan usage of this conversation: {} of a 5-hour limit, {} of the weekly limit.\nCounted from Claude Code's plan usage after each reply; approximate while other sessions work at the same time.\nEstimated API cost (not charged on a subscription): {}\n\nTokens, from the transcript:",
-                            fmt_plan(p.five_hour),
-                            fmt_plan(p.seven_day),
-                            crate::cost::fmt_usd(c.usd)
-                        ),
-                    ),
-                    Some(None) => (String::new(), format!("No plan usage counted for this conversation yet (it updates after Claude's next reply).\nEstimated API cost (not charged on a subscription): {}\n\nTokens, from the transcript:", crate::cost::fmt_usd(c.usd))),
-                    None => (format!("{} · ", crate::cost::fmt_usd(c.usd)), "Estimated from the transcript at API prices".to_string()),
+                let head = match plan_pill {
+                    Some(Some(p)) => format!("5h {} · week {} · ", fmt_plan(p.five_hour), fmt_plan(p.seven_day)),
+                    Some(None) => String::new(),
+                    None => format!("{} · ", crate::cost::fmt_usd(c.usd)),
                 };
                 let ctx = if c.context > 0 { format!("context {} · ", crate::cost::fmt_tokens(c.context)) } else { String::new() };
-                let clickable = can_compact && c.context > 0;
-                let tip = format!(
-                    "Context: {} tokens sent with every request (system prompt, tools, memory and the conversation so far), from the latest request.\n\n{about}\nInput {}  ·  output {}\nCache read {}  ·  cache write {}{}{}",
-                    crate::cost::fmt_tokens(c.context),
-                    crate::cost::fmt_tokens(u.input),
-                    crate::cost::fmt_tokens(u.output),
-                    crate::cost::fmt_tokens(u.cache_read),
-                    crate::cost::fmt_tokens(u.cache_write),
-                    if u.web_searches > 0 { format!("\nWeb searches {}", u.web_searches) } else { String::new() },
-                    if clickable { "\n\nClick to run /compact: replace the conversation so far with a summary, so each request sends less context." } else { "" }
-                );
-                let pill = widgets::pill(ui, &format!("{ctx}{head}{} tokens", crate::cost::fmt_tokens(u.total())), TEXT_DIM, CARD_HI);
-                if clickable {
-                    let resp = ui.interact(pill.rect, ui.auto_id_with("context_pill"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if resp.hovered() {
-                        ui.painter().rect_stroke(pill.rect, pill.rect.height() / 2.0, Stroke::new(1.0, LINK), egui::StrokeKind::Inside);
-                    }
-                    if resp.on_hover_text(tip).clicked() {
-                        compact = true;
-                    }
-                } else {
-                    pill.on_hover_text(tip);
+                let how = match (kind == Kind::Claude && resumable, can_compact && c.context > 0) {
+                    (true, true) => "Click for the /context breakdown and a Compact button.",
+                    (true, false) => "Click for the /context breakdown.",
+                    (false, true) => "Click to open these details, with a Compact button.",
+                    (false, false) => "Click to open these details.",
+                };
+                let tip = format!("{}\n\n{how}", super::context_info::details(&c, plan_pill));
+                let pill = widgets::pill(ui, &format!("{ctx}{head}{} tokens", crate::cost::fmt_tokens(c.usage.total())), TEXT_DIM, CARD_HI);
+                let resp = ui.interact(pill.rect, ui.auto_id_with("context_pill"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.hovered() {
+                    ui.painter().rect_stroke(pill.rect, pill.rect.height() / 2.0, Stroke::new(1.0, LINK), egui::StrokeKind::Inside);
+                }
+                if resp.on_hover_text(tip).clicked() {
+                    show_context = true;
                 }
             }
             if unrestricted_pill {
@@ -423,8 +406,8 @@ impl App {
         if restart {
             self.restart(&ctx, id);
         }
-        if compact {
-            self.send_command_to(id, "/compact");
+        if show_context {
+            self.context_info = Some(super::context_info::ContextInfo::new(id));
         }
         if change_model {
             if is_codex {
