@@ -123,11 +123,9 @@ impl App {
             ui.label(RichText::new(name).family(bold()).size(20.0).color(TEXT));
             ui.label(RichText::new(project.display().to_string()).color(TEXT_FAINT));
             ui.add_space(16.0);
-            let def = self.default_profile();
-            let icon = agent_icon(&def).0;
-            let label = if def.is_agent() { format!("New {} session", def.name) } else { format!("New Shell ({})", def.name) };
-            if widgets::primary_button(ui, icon, &label, ACCENT, "Ctrl+N").clicked() {
-                self.new_default(&ctx, project.clone(), def, false);
+            let (def, variant) = self.default_launch();
+            if widgets::primary_button(ui, agent_icon(&def).0, &launch::launch_label(&def, variant), ACCENT, "The default session (set it in the ▼ New-session menu)").clicked() {
+                self.launch_default(&ctx, project.clone());
             }
             ui.add_space(10.0);
             if is_home_dir(&project) {

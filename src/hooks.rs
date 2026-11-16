@@ -96,15 +96,22 @@ pub fn read_plan_usage() -> std::collections::HashMap<String, PlanShare> {
         .unwrap_or_default()
 }
 
-/// How far a window moved since the last report: the increase within the same window, or
-/// everything used so far once it has reset (a new `resets_at`, or the percentage went down).
-fn window_delta(last: &serde_json::Value, now: Option<Window>) -> f64 {
-    let (Some(now), Some(prev)) = (now, parse_window(last)) else { return 0.0 };
-    let same = now.resets_at.zip(prev.resets_at).is_none_or(|(a, b)| a.abs_diff(b) < 120);
-    if same && now.used >= prev.used {
-        now.used - prev.used
-    } else {
-        now.used
+/// How far a window moved since the last report, and whether the report becomes the new
+/// baseline. Only a later `resets_at` means the window reset (credit everything used so far).
+/// Sessions report at different times and Claude Code re-runs the status line with its last
+/// known values, so a lower percentage in the same window, or an older window, is a stale
+/// report: it credits nothing and leaves the baseline alone (crediting it as a reset used to
+/// pile whole windows onto one conversation).
+fn window_delta(last: &serde_json::Value, now: Option<Window>) -> (f64, bool) {
+    let Some(now) = now else { return (0.0, false) };
+    let Some(prev) = parse_window(last) else { return (0.0, true) };
+    match now.resets_at.zip(prev.resets_at) {
+        Some((a, b)) if a > b + 120 => (now.used, true),
+        Some((a, b)) if a + 120 < b => (0.0, false),
+        _ if now.used >= prev.used => (now.used - prev.used, true),
+        // Lower in the same window: stale. Without reset times we can't tell, so just re-base.
+        Some(_) => (0.0, false),
+        None => (0.0, true),
     }
 }
 
@@ -136,8 +143,8 @@ fn record_plan_usage(session_id: &str, rl: &serde_json::Value) {
     if !v.is_object() {
         v = serde_json::json!({});
     }
-    let d5 = window_delta(&v["last"]["five_hour"], parse_window(&rl["five_hour"]));
-    let d7 = window_delta(&v["last"]["seven_day"], parse_window(&rl["seven_day"]));
+    let (d5, keep5) = window_delta(&v["last"]["five_hour"], parse_window(&rl["five_hour"]));
+    let (d7, keep7) = window_delta(&v["last"]["seven_day"], parse_window(&rl["seven_day"]));
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     if !v["sessions"].is_object() {
         v["sessions"] = serde_json::json!({});
@@ -151,13 +158,13 @@ fn record_plan_usage(session_id: &str, rl: &serde_json::Value) {
     }
     // Forget conversations untouched for 90 days.
     sessions.retain(|_, s| now.saturating_sub(s["t"].as_u64().unwrap_or(now)) < 90 * 86_400);
-    // Keep the previous values of a window Claude didn't report this time.
+    // Keep the previous values of a window Claude didn't report this time, or reported stale.
     let mut last = v["last"].clone();
     if !last.is_object() {
         last = serde_json::json!({});
     }
-    for w in ["five_hour", "seven_day"] {
-        if parse_window(&rl[w]).is_some() {
+    for (w, keep) in [("five_hour", keep5), ("seven_day", keep7)] {
+        if keep {
             last[w] = rl[w].clone();
         }
     }
@@ -311,11 +318,19 @@ mod plan_tests {
     fn window_deltas() {
         let last = serde_json::json!({ "used_percentage": 15, "resets_at": 1000 });
         let w = |used: f64, r: u64| Some(Window { used, resets_at: Some(r) });
-        assert_eq!(window_delta(&last, w(18.0, 1000)), 3.0);
-        assert_eq!(window_delta(&last, w(15.0, 1000)), 0.0);
+        assert_eq!(window_delta(&last, w(18.0, 1000)), (3.0, true));
+        assert_eq!(window_delta(&last, w(15.0, 1000)), (0.0, true));
         // A new window: everything used in it counts.
-        assert_eq!(window_delta(&last, w(4.0, 19000)), 4.0);
+        assert_eq!(window_delta(&last, w(4.0, 19000)), (4.0, true));
         // No previous report: nothing is credited.
-        assert_eq!(window_delta(&serde_json::Value::Null, w(40.0, 1000)), 0.0);
+        assert_eq!(window_delta(&serde_json::Value::Null, w(40.0, 1000)), (0.0, true));
+        // A stale report (lower in the same window, or an older window) credits nothing and
+        // doesn't replace the baseline, so the next real report isn't double-counted.
+        assert_eq!(window_delta(&last, w(14.0, 1000)), (0.0, false));
+        assert_eq!(window_delta(&last, w(30.0, 500)), (0.0, false));
+        // Reset times jitter by a few seconds within one window.
+        assert_eq!(window_delta(&last, w(16.0, 1030)), (1.0, true));
+        // Not reported: nothing.
+        assert_eq!(window_delta(&last, None), (0.0, false));
     }
 }

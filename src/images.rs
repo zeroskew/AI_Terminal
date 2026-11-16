@@ -41,15 +41,38 @@ pub fn save_clipboard_image(img: &arboard::ImageData) -> Result<PathBuf, String>
     Ok(path)
 }
 
-/// Deletes pasted images older than `max_age` (best effort, at startup).
-pub fn cleanup(max_age: Duration) {
+/// Trims the paste folder (best effort): deletes files older than `keep_days`, then the oldest
+/// files until the folder is at most `max_bytes`. 0 means no limit for either. The newest file
+/// is always kept (it was probably just pasted).
+pub fn cleanup(keep_days: u32, max_bytes: u64) {
     let Ok(rd) = std::fs::read_dir(paste_dir()) else { return };
-    let cutoff = SystemTime::now() - max_age;
-    for e in rd.flatten() {
-        if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < cutoff) {
-            let _ = std::fs::remove_file(e.path());
+    let mut files: Vec<(PathBuf, SystemTime, u64)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok().filter(|m| m.is_file())?;
+            Some((e.path(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()))
+        })
+        .collect();
+    // Newest first.
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    let cutoff = (keep_days > 0).then(|| SystemTime::now() - Duration::from_secs(keep_days as u64 * 24 * 3600));
+    let mut total = 0u64;
+    let mut over = false;
+    for (i, (path, modified, len)) in files.iter().enumerate() {
+        let too_old = cutoff.is_some_and(|c| *modified < c);
+        // Once the cap is reached, everything older goes too.
+        over = over || (max_bytes > 0 && total + len > max_bytes);
+        if i > 0 && (too_old || over) {
+            let _ = std::fs::remove_file(path);
+        } else {
+            total += len;
         }
     }
+}
+
+/// Runs [`cleanup`] on a background thread.
+pub fn cleanup_async(keep_days: u32, max_bytes: u64) {
+    std::thread::spawn(move || cleanup(keep_days, max_bytes));
 }
 
 /// Quotes a path for typing into the PTY (always quoted).

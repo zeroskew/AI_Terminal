@@ -1,4 +1,4 @@
-//! Agent CLIs (Claude Code, Codex, Gemini CLI, Qwen Code, OpenCode, Kimi CLI) launched with command-line flags
+//! Agent CLIs (Claude Code, Codex, Antigravity CLI, Qwen Code, OpenCode, Kimi CLI) launched with command-line flags
 //! for unrestricted mode / model / effort / extra parameters, conversation ids for resuming,
 //! model catalogs for the "with settings" dialog, and session names read from transcripts.
 
@@ -14,21 +14,43 @@ pub enum Kind {
     Shell,
     Claude,
     Codex,
-    Gemini,
+    /// Google's Antigravity CLI (`agy`), which replaced Gemini CLI; sessions saved as Gemini load as it.
+    #[serde(alias = "Gemini")]
+    Antigravity,
     Qwen,
     OpenCode,
     Kimi,
 }
 
-impl Kind {
-    /// The other agent CLIs: (kind, menu name, executable).
-    pub const OTHER_AGENTS: [(Kind, &'static str, &'static str); 4] = [
-        (Kind::Gemini, "Gemini", "gemini"),
-        (Kind::Qwen, "Qwen", "qwen"),
-        (Kind::OpenCode, "OpenCode", "opencode"),
-        (Kind::Kimi, "Kimi", "kimi"),
-    ];
+/// An agent CLI the app knows: how it's found, installed and uninstalled. The New-session
+/// menu, detection and Options > Agents all read this table, so a new agent goes here
+/// (plus its `Kind`).
+pub struct AgentSpec {
+    pub kind: Kind,
+    /// Menu name.
+    pub name: &'static str,
+    /// Executable name, without `.exe` / `.cmd`.
+    pub exe: &'static str,
+    /// PowerShell command that installs it.
+    pub install: &'static str,
+    /// Project page.
+    pub url: &'static str,
+    /// npm package, when it can be installed with npm (uninstalled with `npm uninstall -g`).
+    pub npm: Option<&'static str>,
+    /// uv tool name, when installed with `uv tool install`.
+    pub uv: Option<&'static str>,
+}
 
+pub const AGENTS: [AgentSpec; 6] = [
+    AgentSpec { kind: Kind::Claude, name: "Claude", exe: "claude", install: "irm https://claude.ai/install.ps1 | iex", url: "https://docs.claude.com/en/docs/claude-code/setup", npm: Some("@anthropic-ai/claude-code"), uv: None },
+    AgentSpec { kind: Kind::Codex, name: "Codex", exe: "codex", install: "npm install -g '@openai/codex'", url: "https://github.com/openai/codex", npm: Some("@openai/codex"), uv: None },
+    AgentSpec { kind: Kind::Antigravity, name: "Antigravity", exe: "agy", install: "irm https://antigravity.google/cli/install.ps1 | iex", url: "https://antigravity.google", npm: None, uv: None },
+    AgentSpec { kind: Kind::Qwen, name: "Qwen", exe: "qwen", install: "npm install -g '@qwen-code/qwen-code@latest'", url: "https://github.com/QwenLM/qwen-code", npm: Some("@qwen-code/qwen-code"), uv: None },
+    AgentSpec { kind: Kind::OpenCode, name: "OpenCode", exe: "opencode", install: "npm install -g opencode-ai@latest", url: "https://opencode.ai", npm: Some("opencode-ai"), uv: None },
+    AgentSpec { kind: Kind::Kimi, name: "Kimi", exe: "kimi", install: "uv tool install --python 3.13 kimi-cli", url: "https://github.com/MoonshotAI/kimi-cli", npm: None, uv: Some("kimi-cli") },
+];
+
+impl Kind {
     /// Claude / Codex: the app finds their conversations (resume, titles, cost, model).
     /// The other agents run as plain terminal sessions.
     pub fn tracks_conversation(self) -> bool {
@@ -38,9 +60,9 @@ impl Kind {
     /// The flag that starts the agent without permission prompts, if it has one.
     pub fn unrestricted_flag(self) -> Option<&'static str> {
         match self {
-            Kind::Claude => Some("--dangerously-skip-permissions"),
+            Kind::Claude | Kind::Antigravity => Some("--dangerously-skip-permissions"),
             Kind::Codex => Some("--dangerously-bypass-approvals-and-sandbox"),
-            Kind::Gemini | Kind::Qwen | Kind::Kimi => Some("--yolo"),
+            Kind::Qwen | Kind::Kimi => Some("--yolo"),
             Kind::OpenCode | Kind::Shell => None,
         }
     }
@@ -280,7 +302,7 @@ pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str
                 }
             }
         }
-        Kind::Gemini | Kind::Qwen | Kind::OpenCode | Kind::Kimi => {
+        Kind::Antigravity | Kind::Qwen | Kind::OpenCode | Kind::Kimi => {
             if let Some(f) = kind.unrestricted_flag().filter(|_| opts.unrestricted) {
                 if !params.iter().any(|p| p == f) {
                     a.push(f.into());
@@ -293,10 +315,10 @@ pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str
             if let Some(m) = opts.model.as_deref().filter(|m| !m.is_empty()) {
                 a.extend(["--model".into(), m.to_string()]);
             }
-            // First prompt (handoff): Gemini / Qwen run it and stay interactive.
+            // First prompt (handoff): Antigravity / Qwen run it and stay interactive.
             if let Some(p) = opts.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
                 match kind {
-                    Kind::Gemini | Kind::Qwen => a.extend(["--prompt-interactive".into(), p.to_string()]),
+                    Kind::Antigravity | Kind::Qwen => a.extend(["--prompt-interactive".into(), p.to_string()]),
                     Kind::OpenCode => a.extend(["--prompt".into(), p.to_string()]),
                     _ => {}
                 }
@@ -478,20 +500,43 @@ fn codex_sessions() -> Option<PathBuf> {
     Some(base.join("sessions"))
 }
 
-/// Codex rollout files (`sessions/YYYY/MM/DD/rollout-*.jsonl`) modified since `since`.
+/// Codex rollout files (`sessions/YYYY/MM/DD/rollout-*.jsonl`) in the day folders from about `since` on.
 fn codex_rollouts_since(since: SystemTime) -> Vec<PathBuf> {
     let Some(root) = codex_sessions() else { return Vec::new() };
     let mut out = Vec::new();
-    let newer = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t >= since);
-    // Only descend into recently touched year / month / day folders.
-    for y in std::fs::read_dir(&root).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| newer(p)) {
-        for m in std::fs::read_dir(&y).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| newer(p)) {
-            for d in std::fs::read_dir(&m).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| newer(p)) {
+    // Only descend into the year / month / day folders (named by the local date the conversation
+    // started) from a day before `since` on (time-zone slack). A folder's modified time is no
+    // guide: it only changes when an entry is added directly to it, not deeper down.
+    let secs = since.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let from = civil_date((secs / 86_400) as i64 - 1);
+    let num = |p: &Path| p.file_name().and_then(|n| n.to_str()).and_then(|n| n.parse::<i64>().ok());
+    let dirs = |p: &Path| std::fs::read_dir(p).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>();
+    for y in dirs(&root) {
+        let Some(yn) = num(&y).filter(|n| *n >= from.0) else { continue };
+        for m in dirs(&y) {
+            let Some(mn) = num(&m).filter(|n| (yn, *n) >= (from.0, from.1)) else { continue };
+            for d in dirs(&m) {
+                if num(&d).is_none_or(|dn| (yn, mn, dn) < from) {
+                    continue;
+                }
                 out.extend(std::fs::read_dir(&d).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl")));
             }
         }
     }
     out
+}
+
+/// Days since 1970-01-01 → (year, month, day) (H. Hinnant's civil_from_days).
+fn civil_date(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 fn first_line(p: &Path) -> Option<String> {
@@ -573,6 +618,142 @@ pub fn claude_title(cwd: &Path, id: &str) -> Option<String> {
     None
 }
 
+/// A plan-limit window for the status bar: short label ("5h"), long name ("5-hour limit") and usage.
+pub type LimitWindow = (String, String, crate::hooks::Window);
+
+/// Codex's plan limits, from the newest rollout that reports them: its `token_count` events
+/// carry `rate_limits` (primary / secondary window: percent used, length, reset time). The
+/// limits are per account, so any recent conversation will do.
+pub fn codex_limits() -> Vec<LimitWindow> {
+    let since = SystemTime::now() - std::time::Duration::from_secs(8 * 86_400);
+    let mut files: Vec<(SystemTime, PathBuf)> = codex_rollouts_since(since).into_iter().filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p))).collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (mtime, p) in files.into_iter().take(10) {
+        let Ok(mut f) = std::fs::File::open(&p) else { continue };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        let tail = 512 * 1024u64;
+        if f.seek(SeekFrom::Start(len.saturating_sub(tail))).is_err() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let _ = f.take(tail).read_to_end(&mut bytes);
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines().rev().filter(|l| l.contains("\"rate_limits\"")) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            let w = parse_codex_limits(&v["payload"]["rate_limits"], mtime);
+            if !w.is_empty() {
+                return w;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// `rate_limits` → windows. `resets_at` is Unix seconds; older CLIs gave `resets_in_seconds`
+/// (counted from `written`, the file's modification time).
+fn parse_codex_limits(rl: &serde_json::Value, written: SystemTime) -> Vec<LimitWindow> {
+    let written = written.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    ["primary", "secondary"]
+        .iter()
+        .filter_map(|k| {
+            let w = &rl[*k];
+            let used = w["used_percent"].as_f64()?;
+            let resets_at = w["resets_at"].as_u64().or_else(|| w["resets_at"].as_f64().map(|f| f as u64)).or_else(|| w["resets_in_seconds"].as_u64().map(|s| written + s));
+            let (label, long) = window_names(w["window_minutes"].as_u64().unwrap_or(0));
+            Some((label, long, crate::hooks::Window { used, resets_at }))
+        })
+        .collect()
+}
+
+/// One line of `agy -p /usage`: a model group's limit window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgyQuota {
+    /// "Gemini Models", "Claude and GPT models" or a single model ("Gemini 4 Argon").
+    pub group: String,
+    /// "Five Hour Limit Remaining", "Weekly Limit Remaining", ...
+    pub name: String,
+    pub left: f64,
+    pub resets_at: Option<u64>,
+}
+
+/// Antigravity's quota: `agy -p /usage` prints one tab-separated line per window (group, window,
+/// percent left, reset time in UTC). Takes a couple of seconds; run it off the UI thread.
+pub fn antigravity_usage(program: &str) -> Vec<AgyQuota> {
+    run_quiet(program, &["-p", "/usage"]).map(|t| parse_agy_usage(&t)).unwrap_or_default()
+}
+
+fn parse_agy_usage(text: &str) -> Vec<AgyQuota> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').map(str::trim).collect();
+            let [group, name, left, resets] = f[..] else { return None };
+            let left = left.strip_suffix('%')?.trim().parse::<f64>().ok()?;
+            Some(AgyQuota { group: group.into(), name: name.into(), left, resets_at: parse_utc(resets) })
+        })
+        .collect()
+}
+
+/// "2026-11-23T01:54:39Z" → Unix seconds.
+fn parse_utc(s: &str) -> Option<u64> {
+    let s = s.strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let d: Vec<i64> = date.split('-').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let t: Vec<f64> = time.split(':').map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let (&[y, m, d], &[hh, mm, ss]) = (&d[..], &t[..]) else { return None };
+    // Days from civil (H. Hinnant), the inverse of civil_date.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + (hh * 3600.0 + mm * 60.0 + ss) as i64).ok()
+}
+
+/// The status bar's windows from Antigravity's quota: the group the session's model belongs to
+/// ("Claude and GPT models" for those, else the Gemini group), and that group's name.
+pub fn antigravity_limits(rows: &[AgyQuota], model: &str) -> (String, Vec<LimitWindow>) {
+    let m = model.to_lowercase();
+    let other = m.contains("claude") || m.contains("gpt");
+    let group = |g: &str| {
+        let g = g.to_lowercase();
+        if other { g.contains("claude") || g.contains("gpt") } else { g.starts_with("gemini") && g.ends_with("models") }
+    };
+    let mut w: Vec<LimitWindow> = rows
+        .iter()
+        .filter(|r| group(&r.group))
+        .map(|r| {
+            let n = r.name.to_lowercase();
+            let (a, b) = if n.contains("five hour") || n.contains("5 hour") {
+                ("5h", "5-hour limit")
+            } else if n.contains("week") {
+                ("Week", "Weekly limit")
+            } else if n.contains("day") {
+                ("Day", "Daily limit")
+            } else {
+                ("Limit", "Plan limit")
+            };
+            (a.to_string(), b.to_string(), crate::hooks::Window { used: 100.0 - r.left, resets_at: r.resets_at })
+        })
+        .collect();
+    // Shortest window first, as for the other providers.
+    let order = |s: &str| ["5h", "Day", "Week"].iter().position(|x| *x == s).unwrap_or(9);
+    w.sort_by_key(|x| order(&x.0));
+    (rows.iter().find(|r| group(&r.group)).map(|r| r.group.clone()).unwrap_or_default(), w)
+}
+
+/// Names for a limit window of `minutes`: ("5h", "5-hour limit"), ("Week", "Weekly limit"), …
+fn window_names(minutes: u64) -> (String, String) {
+    match minutes {
+        10080 => ("Week".into(), "Weekly limit".into()),
+        1440 => ("Day".into(), "Daily limit".into()),
+        0 => ("Limit".into(), "Plan limit".into()),
+        m if m % 1440 == 0 => (format!("{}d", m / 1440), format!("{}-day limit", m / 1440)),
+        m if m % 60 == 0 => (format!("{}h", m / 60), format!("{}-hour limit", m / 60)),
+        m => (format!("{m}m"), format!("{m}-minute limit")),
+    }
+}
+
 /// The rollout file of a Codex conversation (its name ends with the id).
 pub fn codex_rollout(id: &str) -> Option<PathBuf> {
     let root = codex_sessions()?;
@@ -640,6 +821,49 @@ mod tests {
     }
 
     #[test]
+    fn codex_rate_limits_parse() {
+        let v: serde_json::Value = serde_json::from_str(r#"{"primary":{"used_percent":2.0,"window_minutes":10080,"resets_at":1795208420},"secondary":{"used_percent":40.5,"window_minutes":300,"resets_in_seconds":60}}"#).unwrap();
+        let written = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        let w = parse_codex_limits(&v, written);
+        assert_eq!(w.len(), 2);
+        assert_eq!((w[0].0.as_str(), w[0].1.as_str(), w[0].2.used, w[0].2.resets_at), ("Week", "Weekly limit", 2.0, Some(1795208420)));
+        assert_eq!((w[1].0.as_str(), w[1].2.used, w[1].2.resets_at), ("5h", 40.5, Some(1060)));
+        let none: serde_json::Value = serde_json::from_str(r#"{"primary":null,"secondary":null}"#).unwrap();
+        assert!(parse_codex_limits(&none, written).is_empty());
+        assert_eq!(window_names(2880).0, "2d");
+        assert_eq!(civil_date(0), (1970, 1, 1));
+        assert_eq!(civil_date(20_407), (2025, 11, 15));
+        assert_eq!(civil_date(19_782), (2024, 2, 29));
+    }
+
+    #[test]
+    fn antigravity_usage_parse() {
+        let out = "Gemini Models\tWeekly Limit Remaining\t100%\t2026-11-23T01:54:39Z\n\
+                   Gemini Models\tFive Hour Limit Remaining\t87%\t2026-11-16T06:54:39Z\n\
+                   Claude and GPT models\tWeekly Limit Remaining\t60%\t2026-11-23T01:54:39Z\n\
+                   Claude and GPT models\tFive Hour Limit Remaining\t40%\t2026-11-16T06:54:39Z\n\
+                   Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t99%\t2026-11-23T01:24:36Z\n\
+                   some other line\n";
+        let rows = parse_agy_usage(out);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].resets_at, Some(1_795_398_879)); // 2026-11-23 01:54:39 UTC
+        let (name, g) = antigravity_limits(&rows, "gemini-4-argon");
+        assert_eq!(name, "Gemini Models");
+        assert_eq!(g.iter().map(|w| (w.0.as_str(), w.2.used)).collect::<Vec<_>>(), [("5h", 13.0), ("Week", 0.0)]);
+        let (name, c) = antigravity_limits(&rows, "Claude Opus 5.5");
+        assert_eq!(name, "Claude and GPT models");
+        assert_eq!(c.iter().map(|w| (w.0.as_str(), w.2.used)).collect::<Vec<_>>(), [("5h", 60.0), ("Week", 40.0)]);
+        assert_eq!(parse_utc("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_utc("2000-03-01T00:00:00Z"), Some(951_868_800));
+    }
+
+    #[test]
+    #[ignore] // reads the real ~/.codex: cargo test codex_limits_from_disk -- --ignored --nocapture
+    fn codex_limits_from_disk() {
+        eprintln!("{:?}", codex_limits());
+    }
+
+    #[test]
     fn codex_instruction_is_valid_toml_string() {
         assert_eq!(toml_string("a \"b\" c\\d\ne"), r#""a \"b\" c\\d\ne""#);
         assert!(wants_naming(true, " ", None));
@@ -656,7 +880,7 @@ mod tests {
         let c = LaunchOpts { unrestricted: true, model: Some("gpt-x".into()), effort: Some("low".into()), ..Default::default() };
         assert_eq!(build_args(Kind::Codex, &c, "", Some("id1"), "k"), vec!["resume", "id1", "--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-x", "-c", "model_reasoning_effort=\"low\""]);
         let g = LaunchOpts { unrestricted: true, model: Some("gemini-x".into()), cli_params: "-m old --debug".into(), initial_prompt: Some("hi".into()), ..Default::default() };
-        assert_eq!(build_args(Kind::Gemini, &g, "", None, "k"), vec!["--yolo", "--debug", "--model", "gemini-x", "--prompt-interactive", "hi"]);
+        assert_eq!(build_args(Kind::Antigravity, &g, "", None, "k"), vec!["--dangerously-skip-permissions", "--debug", "--model", "gemini-x", "--prompt-interactive", "hi"]);
         assert_eq!(build_args(Kind::OpenCode, &g, "", None, "k"), vec!["--debug", "--model", "gemini-x", "--prompt", "hi"]);
         // Codex handoff: the first prompt is passed once, and not when resuming.
         let h = LaunchOpts { initial_prompt: Some("hi".into()), ..Default::default() };

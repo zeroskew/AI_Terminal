@@ -3,7 +3,7 @@
 //! the terminal lock each frame.
 
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -99,6 +99,7 @@ impl Profile {
     /// pwsh (if on PATH), powershell and cmd. An executable that isn't an .exe (an npm .cmd
     /// shim) is started through `cmd /s /c`.
     pub fn detect() -> Vec<Profile> {
+        refresh_path();
         let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
         let agent = |name: &str, exe: &str, kind: Kind| -> Option<Profile> {
             if let Some(p) = find_on_path(&format!("{exe}.exe")).or_else(|| extra_agent_dirs(exe).into_iter().find(|p| p.is_file())) {
@@ -113,8 +114,8 @@ impl Profile {
             let exe = crate::winsys::package_root("OpenAI.Codex_")?.join("app").join("resources").join("codex.exe");
             exe.is_file().then(|| Profile { name: CODEX.into(), program: exe.display().to_string(), args: vec![], kind: Kind::Codex })
         }));
-        for (kind, name, exe) in Kind::OTHER_AGENTS {
-            v.extend(agent(name, exe, kind));
+        for s in crate::agents::AGENTS.iter().filter(|s| !matches!(s.kind, Kind::Claude | Kind::Codex)) {
+            v.extend(agent(s.name, s.exe, s.kind));
         }
         if let Some(p) = find_on_path("pwsh.exe") {
             v.push(Profile { name: "pwsh".into(), program: p.display().to_string(), args: vec![], kind: Kind::Shell });
@@ -140,8 +141,8 @@ impl Profile {
                 self.kind = Kind::Claude;
             } else if n.contains("codex") {
                 self.kind = Kind::Codex;
-            } else if let Some((k, ..)) = Kind::OTHER_AGENTS.iter().find(|(_, name, _)| n == name.to_lowercase()) {
-                self.kind = *k;
+            } else if let Some(s) = crate::agents::AGENTS.iter().find(|s| n == s.name.to_lowercase()) {
+                self.kind = s.kind;
             }
         }
     }
@@ -151,7 +152,7 @@ pub const CLAUDE: &str = "Claude";
 pub const CODEX: &str = "Codex";
 
 /// Where we also look for the agent CLIs when they aren't on PATH.
-fn extra_agent_dirs(exe: &str) -> Vec<PathBuf> {
+pub(crate) fn extra_agent_dirs(exe: &str) -> Vec<PathBuf> {
     let mut v = Vec::new();
     let file = format!("{exe}.exe");
     if let Some(l) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
@@ -160,6 +161,8 @@ fn extra_agent_dirs(exe: &str) -> Vec<PathBuf> {
             v.push(l.join("Programs").join("AnthropicClaude").join(&file));
         } else if exe == "codex" {
             v.push(l.join("Programs").join("OpenAI").join("Codex").join("bin").join(&file));
+        } else if exe == "agy" {
+            v.push(l.join("agy").join("bin").join(&file));
         }
     }
     if let Some(h) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
@@ -169,7 +172,29 @@ fn extra_agent_dirs(exe: &str) -> Vec<PathBuf> {
     v
 }
 
-fn find_on_path(exe: &str) -> Option<PathBuf> {
+/// Appends to our PATH the folders the registry PATH gained since we started (an agent CLI
+/// installed meanwhile), so detection and the sessions we start (which inherit it) see them.
+pub(crate) fn refresh_path() {
+    #[cfg(windows)]
+    {
+        let mut cur: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        let norm = |p: &Path| p.to_string_lossy().trim_end_matches(['\\', '/']).to_lowercase();
+        let mut added = false;
+        for d in crate::winsys::registry_path() {
+            if !cur.iter().any(|c| norm(c) == norm(&d)) {
+                cur.push(d);
+                added = true;
+            }
+        }
+        if added {
+            if let Ok(p) = std::env::join_paths(cur) {
+                std::env::set_var("PATH", p);
+            }
+        }
+    }
+}
+
+pub(crate) fn find_on_path(exe: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(exe)).find(|p| p.is_file())
 }
 

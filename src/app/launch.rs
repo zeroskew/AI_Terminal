@@ -2,29 +2,85 @@
 
 use super::*;
 
-/// The CLI's command name for the launch dialog ("claude", "gemini", ...).
+/// The CLI's command name for the launch dialog ("claude", "agy", ...).
 fn cli_name(p: &Profile) -> String {
     let prog = if p.args.len() == 3 && p.args[0] == "/s" { &p.args[2] } else { &p.program };
     prog.rsplit(['\\', '/']).next().unwrap_or(prog).trim_end_matches(".exe").to_lowercase()
 }
 
+pub(super) const VARIANT_UNRESTRICTED: &str = "unrestricted";
+pub(super) const VARIANT_SETTINGS: &str = "settings";
+
+/// A launch row's label: "New Codex session (unrestricted)", "New Shell (cmd)", ...
+pub(super) fn launch_label(p: &Profile, variant: &str) -> String {
+    if !p.is_agent() {
+        return format!("New Shell ({})", p.name);
+    }
+    match variant {
+        VARIANT_UNRESTRICTED => format!("New {} session (unrestricted)", p.name),
+        VARIANT_SETTINGS => format!("New {} session (with settings)", p.name),
+        _ => format!("New {} session", p.name),
+    }
+}
+
 impl App {
+    /// The default launch (New-session button, project page, the "new default session" key):
+    /// its profile and variant; plain when the saved variant doesn't apply to the profile.
+    pub(super) fn default_launch(&self) -> (Profile, &'static str) {
+        let p = self.default_profile();
+        let v = match self.s.default_variant.as_str() {
+            VARIANT_UNRESTRICTED if p.kind.unrestricted_flag().is_some() => VARIANT_UNRESTRICTED,
+            VARIANT_SETTINGS if p.is_agent() => VARIANT_SETTINGS,
+            _ => "",
+        };
+        (p, v)
+    }
+
+    /// Runs the default launch in `project`.
+    pub(super) fn launch_default(&mut self, ctx: &egui::Context, project: PathBuf) {
+        let (p, v) = self.default_launch();
+        match v {
+            VARIANT_SETTINGS => self.open_launch_dialog(project, p, None),
+            _ => self.new_default(ctx, project, p, v == VARIANT_UNRESTRICTED),
+        }
+    }
+
     /// The New-session menu: per agent "New X session", "(unrestricted)", "(model) ▸",
     /// "(with settings)", then "New Shell (…)" per shell.
     pub(super) fn new_session_menu(&mut self, ui: &mut Ui, ctx: &egui::Context, project: &Path) {
         ui.set_min_width(330.0);
+        // Pick up agent CLIs installed (or removed) while the app runs; a handful of file checks.
+        if self.profiles_at.elapsed() > std::time::Duration::from_secs(3) {
+            let fresh = Profile::detect();
+            self.profiles_at = std::time::Instant::now();
+            if fresh != self.profiles {
+                self.profiles = fresh;
+                self.refresh_catalog(ctx);
+            }
+        }
         let profiles = self.profiles.clone();
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let mut chosen: Option<(Profile, Option<bool>)> = None; // (profile, Some(unrestricted) | None = with settings)
         let mut with_model: Option<(Profile, Option<String>)> = None; // (profile, model | None = CLI default)
         let loading = self.catalog_loading();
         let mut refresh = false;
+        let mut set_default: Option<(String, &str)> = None; // (profile name, variant)
+        let (def_profile, def_variant) = self.default_launch();
+        let def_profile = def_profile.name;
+        // A launch row with its default marker; true when clicked.
+        let mut row = |ui: &mut Ui, p: &Profile, variant: &'static str| -> bool {
+            let (clicked, make_default) = menu_item_default(ui, agent_icon(p), &launch_label(p, variant), p.name == def_profile && def_variant == variant);
+            if make_default {
+                set_default = Some((p.name.clone(), variant));
+            }
+            clicked
+        };
         for p in profiles.iter().filter(|p| p.is_agent()) {
             let n = &p.name;
-            if menu_item(ui, agent_icon(p), &format!("New {n} session")) {
+            if row(ui, p, "") {
                 chosen = Some((p.clone(), Some(false)));
             }
-            if p.kind.unrestricted_flag().is_some() && menu_item(ui, agent_icon(p), &format!("New {n} session (unrestricted)")) {
+            if p.kind.unrestricted_flag().is_some() && row(ui, p, VARIANT_UNRESTRICTED) {
                 chosen = Some((p.clone(), Some(true)));
             }
             let models = catalog.models(p.kind);
@@ -53,14 +109,75 @@ impl App {
                     }
                 });
             }
-            if menu_item(ui, agent_icon(p), &format!("New {n} session (with settings)")) {
+            if row(ui, p, VARIANT_SETTINGS) {
                 chosen = Some((p.clone(), None));
             }
         }
         for p in profiles.iter().filter(|p| !p.is_agent()) {
-            if menu_item(ui, (Icon::Prompt, Color32::from_rgb(78, 201, 176)), &format!("New Shell ({})", p.name)) {
+            if row(ui, p, "") {
                 chosen = Some((p.clone(), Some(false)));
             }
+        }
+        if let Some((name, variant)) = set_default {
+            self.s.default_profile = name;
+            self.s.default_variant = variant.to_string();
+        }
+        // Agent CLIs that weren't found: install them from here.
+        // Agent CLIs that weren't found: install them from here (same table and action as
+        // Options > Agents, which also uninstalls).
+        let missing: Vec<&'static crate::agents::AgentSpec> = crate::agents::AGENTS.iter().filter(|s| !profiles.iter().any(|p| p.kind == s.kind)).collect();
+        let mut install: Option<&'static crate::agents::AgentSpec> = None;
+        let mut redetect = false;
+        let mut manage = false;
+        ui.separator();
+        if !missing.is_empty() {
+            let row = menu_row(ui, (Icon::Plus, TEXT_FAINT), &format!("Need to install ({})", missing.len()), true);
+            egui::containers::menu::SubMenu::new().show(ui, &row, |ui| {
+                ui.set_min_width(300.0);
+                for spec in &missing {
+                    let busy = self.agent_job_running(spec.kind);
+                    ui.horizontal(|ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                        let probe = Profile { name: spec.name.to_string(), program: String::new(), args: vec![], kind: spec.kind };
+                        let (ic, col) = agent_icon(&probe);
+                        widgets::paint_icon(ui.painter(), ic, r.center(), 14.0, col);
+                        ui.label(RichText::new(spec.name).color(TEXT));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = if busy { "Installing…" } else { "Install" };
+                            if ui.add_enabled(!busy, egui::Button::new(label)).on_hover_text(format!("Runs in the background:\n{}", spec.install)).clicked() {
+                                install = Some(spec);
+                                ui.close();
+                            }
+                            if ui.link("website").on_hover_text(spec.url).clicked() {
+                                crate::links::open_url(spec.url);
+                            }
+                        });
+                    });
+                }
+                ui.separator();
+                if ui.button("⟳ Re-detect agents").on_hover_text("Look for the agent CLIs again (after installing one)").clicked() {
+                    redetect = true;
+                }
+            });
+        }
+        if menu_row(ui, (Icon::Gear, TEXT_FAINT), "Manage agents…", false).on_hover_text("Options > Agents: install and uninstall agent CLIs").clicked() {
+            manage = true;
+        }
+        if manage {
+            ui.close();
+            self.options = Some(OptPage::Agents);
+            return;
+        }
+        if redetect {
+            self.redetect_agents(ctx);
+            let found: Vec<&str> = missing.iter().filter(|s| self.profiles.iter().any(|p| p.kind == s.kind)).map(|s| s.name).collect();
+            let msg = if found.is_empty() { "No new agent CLIs found".to_string() } else { format!("Found: {}", found.join(", ")) };
+            self.toast(msg, if found.is_empty() { TEXT_FAINT } else { GREEN }, ctx);
+        }
+        if let Some(spec) = install {
+            ui.close();
+            self.install_agent(ctx, spec);
+            return;
         }
         if refresh {
             self.refresh_catalog(ctx);

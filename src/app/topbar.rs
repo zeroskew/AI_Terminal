@@ -254,7 +254,9 @@ impl App {
         let mut restart = false;
         let mut compact = false;
         let mut change_model = false;
-        let can_compact = exited.is_none() && tab.sess.profile.kind == Kind::Claude;
+        // Claude and Codex both have /model and /compact.
+        let is_codex = tab.sess.profile.kind == Kind::Codex;
+        let can_compact = exited.is_none() && (tab.sess.profile.kind == Kind::Claude || is_codex);
         ui.horizontal_centered(|ui| {
             let name_for_pill = name.clone();
             ui.label(RichText::new(name).family(bold()).size(14.0).color(TEXT));
@@ -263,7 +265,7 @@ impl App {
             } else if profile != name_for_pill {
                 widgets::pill(ui, &profile, TEXT_DIM, CARD_HI);
             }
-            if can_compact && super::status_bar::link_button(ui, "change", "Switch this session to another model (sends /model)") {
+            if can_compact && super::status_bar::link_button(ui, "change", if is_codex { "Switch this session to another model or reasoning effort (opens Codex's /model picker)" } else { "Switch this session to another model (sends /model)" }) {
                 change_model = true;
             }
             if busy_pill {
@@ -367,7 +369,12 @@ impl App {
             self.send_command_to(id, "/compact");
         }
         if change_model {
-            self.model_switch = Some(id);
+            if is_codex {
+                // Codex has its own model and reasoning-effort picker.
+                self.send_command_to(id, "/model");
+            } else {
+                self.model_switch = Some(id);
+            }
         }
     }
 }
