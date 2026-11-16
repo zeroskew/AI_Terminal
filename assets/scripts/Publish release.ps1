@@ -1,39 +1,16 @@
-# Publish dist\ai_terminal.exe as a GitHub Release (tag = v<date-time>)
+# Release build, then publish it as a GitHub Release (tag = v<date-time>)
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $root = (git rev-parse --show-toplevel) -replace '/', '\'
 if (-not $root) { Write-Host "Not inside a git repository." -ForegroundColor Red; exit 1 }
 Set-Location $root
 
-$exe = Join-Path $root 'dist\ai_terminal.exe'
-if (-not (Test-Path $exe)) { Write-Host "dist\ai_terminal.exe not found - run a release build first." -ForegroundColor Red; exit 1 }
-if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Host "GitHub CLI (gh) is not installed." -ForegroundColor Red; exit 1 }
-
-# The tag is the build's own version stamp (UTC build time), so the app's self-update can tell
-# whether a release is newer than itself. Every release build gets a new one; no manual bump.
-$version = (& $exe --version | Out-String).Trim()
-if ($version -notmatch '^\d{4}\.\d{2}\.\d{2}-\d{4}$') { Write-Host "dist\ai_terminal.exe doesn't report a version (got '$version') - rebuild it." -ForegroundColor Red; exit 1 }
-$tag = "v$version"
-if (gh release view $tag 2>$null) { Write-Host "Release $tag already exists - rebuild to get a new version." -ForegroundColor Red; exit 1 }
-
-# The tag must point at pushed code
-if (git status --porcelain) { Write-Host "Warning: uncommitted changes in the working tree." -ForegroundColor Yellow }
-if (git log '@{u}..' --oneline 2>$null) { Write-Host "Warning: unpushed commits - the release tag will point at the remote HEAD." -ForegroundColor Yellow }
-
-$zip = Join-Path $env:TEMP 'ai_terminal.zip'
-Remove-Item $zip -ErrorAction SilentlyContinue
-Compress-Archive -Path $exe -DestinationPath $zip -CompressionLevel Optimal
-$size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-Write-Host "Release $tag  (ai_terminal.zip, $size MB)" -ForegroundColor Cyan
-Write-Host "Enter = publish, n = cancel"
-$answer = Read-Host
-if ($null -eq $answer -or $answer -eq 'n') { Remove-Item $zip -ErrorAction SilentlyContinue; Write-Host "Cancelled."; exit 0 }
-
-gh release create $tag $zip --title $tag --generate-notes
+# build_publish_exe.cmd does it all: a fresh version stamp (so every run gets a new tag), a
+# release build into target\release (a running dist\ai_terminal.exe doesn't block it), the zip,
+# a Publish? [Y/n] question, then gh release create.
+$cmd = Join-Path $root 'build_publish_exe.cmd'
+if (-not (Test-Path $cmd)) { Write-Host "build_publish_exe.cmd not found in $root." -ForegroundColor Red; exit 1 }
+& $cmd @args
 $code = $LASTEXITCODE
-Remove-Item $zip -ErrorAction SilentlyContinue
-if ($code -ne 0) { exit $code }
-
-Write-Host "`nDownload: https://github.com/zeroskew/AI_Terminal/releases/latest/download/ai_terminal.zip" -ForegroundColor Green
-Write-Host "DONE" -ForegroundColor Green
-exit 0
+if ($code -eq 0) { Write-Host "DONE" -ForegroundColor Green }
+exit $code
