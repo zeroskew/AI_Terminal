@@ -14,6 +14,12 @@ images inside the terminal**.
 
 ![Home: all projects](screenshots/home.png)
 
+## Download
+
+**[Download ai_terminal.zip](https://github.com/zeroskew/AI_Terminal/releases/latest/download/ai_terminal.zip)**
+(latest release). Unzip and run `ai_terminal.exe`; there is no installer. All releases are on the
+[Releases page](https://github.com/zeroskew/AI_Terminal/releases).
+
 ## Features
 
 - **Layout**: project tabs across the top (Home + a tab per project ticked **Show in tabs**;
