@@ -631,7 +631,9 @@ fn tidy_prompt(s: &str) -> Option<String> {
     if s.is_empty() || s.starts_with('<') {
         return None;
     }
-    let line = s.lines().next().unwrap_or(s).trim();
+    // Pasted images arrive as quoted paths ("C:\…\paste-….png"); they make poor names.
+    let s = strip_image_paths(s);
+    let line = s.lines().map(str::trim).find(|l| !l.is_empty())?;
     let mut out: String = line.chars().take(70).collect();
     if line.chars().count() > 70 {
         out.push('…');
@@ -639,27 +641,34 @@ fn tidy_prompt(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// A Claude session's name: its `custom-title` (set by /rename, `-n` or Claude's auto-title),
-/// else its first prompt.
-pub fn claude_title(cwd: &Path, id: &str) -> Option<String> {
-    let path = claude_dir(cwd)?.join(format!("{id}.jsonl"));
-    let mut f = std::fs::File::open(&path).ok()?;
-    let len = f.metadata().ok()?.len();
-    // custom-title records are appended; look at the tail.
-    let tail = 512 * 1024u64;
-    f.seek(SeekFrom::Start(len.saturating_sub(tail))).ok()?;
-    let mut buf = String::new();
-    let _ = f.take(tail).read_to_string(&mut buf);
-    let mut title = None;
-    for line in buf.lines().filter(|l| l.contains("\"custom-title\"")) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(t) = v["customTitle"].as_str().filter(|t| !t.trim().is_empty()) {
-                title = Some(t.trim().to_string());
-            }
+/// `s` without quoted image file paths (and the space or colon left before them).
+fn strip_image_paths(s: &str) -> String {
+    const EXTS: [&str; 7] = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif"];
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('"') {
+        let after = &rest[i + 1..];
+        let Some(j) = after.find('"') else { break };
+        let inner = &after[..j];
+        let is_img = !inner.contains('\n') && (inner.contains('\\') || inner.contains('/')) && EXTS.iter().any(|e| inner.to_lowercase().ends_with(e));
+        if is_img {
+            out.push_str(rest[..i].trim_end_matches([' ', ':']));
+            rest = &after[j + 1..];
+        } else {
+            out.push_str(&rest[..i + 1]);
+            rest = after;
         }
     }
-    if title.is_some() {
-        return title;
+    out.push_str(rest);
+    out
+}
+
+/// A Claude session's name: its `custom-title` (set by /rename or `-n`), else Claude's
+/// `ai-title`, else its first prompt.
+pub fn claude_title(cwd: &Path, id: &str) -> Option<String> {
+    let path = claude_dir(cwd)?.join(format!("{id}.jsonl"));
+    if let Some(t) = claude_tail_title(&path) {
+        return Some(t);
     }
     let f = std::fs::File::open(&path).ok()?;
     for line in std::io::BufReader::new(f).take(4 << 20).lines().map_while(Result::ok) {
@@ -674,6 +683,128 @@ pub fn claude_title(cwd: &Path, id: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// A Claude Code conversation found on disk (started by any app: the CLI, Claude's desktop app,
+/// other terminals), for listing it here so it can be resumed.
+#[derive(Clone, Debug)]
+pub struct FoundClaude {
+    pub id: String,
+    /// The folder it ran in (Claude resumes it only from there).
+    pub cwd: PathBuf,
+    pub title: Option<String>,
+    /// Unix seconds: first message, last write.
+    pub created: u64,
+    pub used: u64,
+}
+
+/// Every resumable Claude conversation in `~/.claude/projects` (top-level transcripts only, so
+/// subagent runs are left out), skipping scripted runs (`claude -p` / SDK), conversations
+/// without a typed prompt, folders that no longer exist or live under the temp folder, and
+/// transcripts created at or after `before` (those belong to sessions starting right now).
+pub fn scan_claude_conversations(before: SystemTime) -> Vec<FoundClaude> {
+    let Some(root) = home().map(|h| h.join(".claude").join("projects")) else { return Vec::new() };
+    let temp: Vec<String> = [std::env::var_os("TEMP"), std::env::var_os("TMP")]
+        .into_iter()
+        .flatten()
+        .map(|t| norm_path(&PathBuf::from(t)))
+        .chain(["c:\\temp\\claude".to_string()])
+        .collect();
+    let mut out = Vec::new();
+    for dir in std::fs::read_dir(&root).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(m) = e.metadata() else { continue };
+            let created = m.created().or_else(|_| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            if created >= before {
+                continue;
+            }
+            let Some(mut f) = read_claude_head(&p) else { continue };
+            let n = norm_path(&f.cwd);
+            if temp.iter().any(|t| n == *t || n.starts_with(&format!("{t}\\"))) || !f.cwd.is_dir() {
+                continue;
+            }
+            let secs = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            if f.created == 0 {
+                f.created = secs(created);
+            }
+            f.used = secs(m.modified().unwrap_or(created));
+            f.title = claude_tail_title(&p).or(f.title);
+            out.push(f);
+        }
+    }
+    out
+}
+
+fn norm_path(p: &Path) -> String {
+    p.display().to_string().to_lowercase().replace('/', "\\").trim_end_matches('\\').to_string()
+}
+
+/// The transcript's id, folder, start time and first typed prompt (from its first lines), or
+/// None when it isn't an interactive conversation.
+fn read_claude_head(p: &Path) -> Option<FoundClaude> {
+    let id = p.file_stem()?.to_str()?.to_string();
+    let f = std::fs::File::open(p).ok()?;
+    let mut cwd = None;
+    let mut created = 0;
+    for line in std::io::BufReader::new(f).take(8 << 20).lines().map_while(Result::ok).take(2000) {
+        if !line.contains("\"type\":\"user\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if v["isSidechain"].as_bool() == Some(true) || v["entrypoint"].as_str().is_some_and(|e| e.starts_with("sdk")) {
+            return None;
+        }
+        if cwd.is_none() {
+            cwd = v["cwd"].as_str().filter(|c| !c.is_empty()).map(PathBuf::from);
+            created = v["timestamp"].as_str().and_then(parse_iso_secs).unwrap_or(0);
+        }
+        let c = &v["message"]["content"];
+        let text = c.as_str().map(str::to_string).or_else(|| c.as_array().and_then(|a| a.iter().find(|p| p["type"] == "text").and_then(|p| p["text"].as_str()).map(str::to_string)));
+        if let Some(t) = text.as_deref().and_then(tidy_prompt) {
+            return Some(FoundClaude { id, cwd: cwd?, title: Some(t), created, used: 0 });
+        }
+    }
+    None
+}
+
+/// The last `custom-title` (set by /rename or -n), else the last `ai-title`, from the tail.
+fn claude_tail_title(p: &Path) -> Option<String> {
+    let mut f = std::fs::File::open(p).ok()?;
+    let len = f.metadata().ok()?.len();
+    let tail = 512 * 1024u64;
+    f.seek(SeekFrom::Start(len.saturating_sub(tail))).ok()?;
+    let mut bytes = Vec::new();
+    let _ = f.take(tail).read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes);
+    let (mut custom, mut ai) = (None, None);
+    for line in text.lines().filter(|l| l.contains("-title\"")) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let pick = |k: &str| v[k].as_str().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+        match v["type"].as_str() {
+            Some("custom-title") => custom = pick("customTitle").or(custom),
+            Some("ai-title") => ai = pick("aiTitle").or(ai),
+            _ => {}
+        }
+    }
+    custom.or(ai)
+}
+
+/// "2026-11-15T17:32:57.263Z" → Unix seconds (UTC).
+fn parse_iso_secs(s: &str) -> Option<u64> {
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, se) = (num(0..4)?, num(5..7)?, num(8..10)?, num(11..13)?, num(14..16)?, num(17..19)?);
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + h * 3600 + mi * 60 + se).ok()
 }
 
 /// A plan-limit window for the status bar: short label ("5h"), long name ("5-hour limit") and usage.
@@ -1042,6 +1173,46 @@ pub fn agy_title(id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_names_skip_pasted_images() {
+        assert_eq!(tidy_prompt("\"C:\\Temp\\AI_Terminal\\paste\\paste-1.png\"\nwhy I do not see publish here?").as_deref(), Some("why I do not see publish here?"));
+        assert_eq!(tidy_prompt("what does this say: \"C:\\Temp\\p\\paste-2.png\" ?").as_deref(), Some("what does this say ?"));
+        assert_eq!(tidy_prompt("\"C:\\Temp\\p\\paste-3.png\""), None);
+        assert_eq!(tidy_prompt("say \"hello\" twice").as_deref(), Some("say \"hello\" twice"));
+    }
+
+    #[test]
+    fn iso_timestamps() {
+        assert_eq!(parse_iso_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso_secs("2026-11-15T17:32:57.263Z"), Some(1_794_763_977));
+        assert_eq!(parse_iso_secs("2000-02-29T12:00:00Z"), Some(951_825_600));
+        assert_eq!(parse_iso_secs("garbage"), None);
+    }
+
+    #[test]
+    fn claude_transcripts_found() {
+        let dir = std::env::temp_dir().join(format!("ait_scan_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cwd = r"X:\\Proj";
+        let write = |name: &str, lines: &[String]| {
+            let p = dir.join(format!("{name}.jsonl"));
+            std::fs::write(&p, lines.join("\n")).unwrap();
+            p
+        };
+        let user = |extra: &str, text: &str| format!(r#"{{"type":"user","isSidechain":false,"cwd":"{cwd}","timestamp":"2026-11-15T17:32:57Z"{extra},"message":{{"role":"user","content":"{text}"}}}}"#);
+        // Interactive: titled by the last custom-title, else the ai-title.
+        let a = write("a", &[r#"{"type":"mode"}"#.into(), user(r#","entrypoint":"cli""#, "<command-name>/clear</command-name>"), user("", "Fix the build"), r#"{"type":"ai-title","aiTitle":"Fixing build"}"#.into()]);
+        let f = read_claude_head(&a).unwrap();
+        assert_eq!((f.id.as_str(), f.cwd, f.title.as_deref(), f.created), ("a", PathBuf::from(r"X:\Proj"), Some("Fix the build"), 1_794_763_977));
+        assert_eq!(claude_tail_title(&a).as_deref(), Some("Fixing build"));
+        let b = write("b", &[user("", "hi"), r#"{"type":"custom-title","customTitle":"Mine"}"#.into(), r#"{"type":"ai-title","aiTitle":"Later"}"#.into()]);
+        assert_eq!(claude_tail_title(&b).as_deref(), Some("Mine"));
+        // Scripted runs and conversations without a typed prompt are skipped.
+        assert!(read_claude_head(&write("c", &[user(r#","entrypoint":"sdk-cli""#, "commit msg")])).is_none());
+        assert!(read_claude_head(&write("d", &[r#"{"type":"mode"}"#.into()])).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn antigravity_resumes_by_conversation() {

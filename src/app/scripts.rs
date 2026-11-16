@@ -227,9 +227,14 @@ impl App {
                     if r.exit.is_none() && r.stdin.is_some() {
                         ui.horizontal(|ui| {
                             let te = ui.add(egui::TextEdit::singleline(&mut r.input).hint_text("Type an answer (Enter sends)").desired_width(ui.available_width() - 60.0));
+                            // Keep asking until it has the keyboard: the request is dropped while
+                            // the Scripts palette (a modal) is still closing.
                             if !r.input_focused {
-                                r.input_focused = true;
-                                te.request_focus();
+                                if te.has_focus() {
+                                    r.input_focused = true;
+                                } else {
+                                    te.request_focus();
+                                }
                             }
                             let enter = te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                             if ui.button("Send").clicked() || enter {
@@ -357,9 +362,13 @@ impl App {
         if m.should_close() {
             close = true;
         }
+        // A started script's answer box takes the keyboard, so the terminal doesn't.
+        let mut started = false;
         if let Some(i) = pick {
             let sc = self.scripts[i].clone();
+            let n = self.script_runs.len();
             self.run_script(ctx, &sc);
+            started = self.script_runs.len() > n;
             close = true;
         }
         if edit {
@@ -369,7 +378,7 @@ impl App {
         if close {
             self.scripts_open = false;
             self.script_filter.clear();
-            self.focus_terminal = true;
+            self.focus_terminal = !started;
         }
     }
 }
@@ -414,7 +423,7 @@ pub(super) struct ScriptRun {
     text: (usize, String),
     exit: Option<i32>,
     input: String,
-    /// The answer box has been focused once (it takes focus when it first appears).
+    /// The answer box has had the keyboard once (it takes it when it first appears).
     input_focused: bool,
     collapsed: bool,
     /// When the auto-dismiss countdown started (it finished successfully; a click in the panel cancels it).

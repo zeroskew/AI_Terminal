@@ -21,6 +21,14 @@ impl App {
                             ui.add(egui::Image::new((tex.id(), Vec2::splat(32.0))));
                         }
                         ui.label(RichText::new("AI Terminal  ·  Projects").family(bold()).size(22.0).color(TEXT));
+                        // Home has no sidebar, so Options (gear) and plugins get their buttons here.
+                        ui.add_space(12.0);
+                        if widgets::icon_button(ui, Icon::Plugin, 28.0, TEXT_DIM, "Claude Code plugins").clicked() {
+                            self.open_plugins();
+                        }
+                        if widgets::icon_button(ui, Icon::Gear, 28.0, TEXT_DIM, "Options").clicked() {
+                            self.options = Some(OptPage::General);
+                        }
                     });
                     ui.label(RichText::new("Each project is a folder; its sessions start there. \"Show in tabs\" puts it on the tab bar; Ctrl+1…9 or Ctrl+PgUp / PgDn switch tabs.").color(TEXT_DIM));
                     ui.add_space(14.0);

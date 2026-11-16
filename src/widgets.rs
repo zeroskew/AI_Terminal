@@ -32,6 +32,8 @@ pub enum Icon {
     OpenCode,
     /// A magnifying glass.
     Search,
+    /// GitHub: its cat mark, the cat filled inside a ring.
+    GitHub,
 }
 
 /// Fills a logo given as convex pieces in -1..1 coordinates, scaled by `h` around `c`. A hairline
@@ -153,6 +155,28 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             fill_pieces(p, c, h * 0.9, KIMI_DOT, Color32::from_rgb(23, 131, 255));
         }
         Icon::OpenCode => fill_pieces(p, c, h * 0.9, OPENCODE, col),
+        Icon::GitHub => {
+            let at = |x: f32, y: f32| c + Vec2::new(x, y) * h;
+            p.circle_stroke(c, h * 0.92, Stroke::new(1.3, col));
+            // Head: a wide oval with two ears.
+            let head: Vec<Pos2> = (0..24).map(|i| {
+                let t = i as f32 / 24.0 * std::f32::consts::TAU;
+                at(0.46 * t.cos(), -0.12 + 0.36 * t.sin())
+            }).collect();
+            p.add(Shape::convex_polygon(head, col, Stroke::new(0.35, col)));
+            for sx in [-1.0, 1.0] {
+                p.add(Shape::convex_polygon(vec![at(sx * 0.44, -0.24), at(sx * 0.40, -0.62), at(sx * 0.12, -0.42)], col, Stroke::new(0.35, col)));
+            }
+            // Neck down to the ring, and the tail curling up to the left.
+            p.add(Shape::convex_polygon(vec![at(-0.2, 0.15), at(0.2, 0.15), at(0.22, 0.88), at(-0.22, 0.88)], col, Stroke::new(0.35, col)));
+            // Quadratic curve: out from the body, down-left, then up.
+            let tail: Vec<Pos2> = (0..=10).map(|i| {
+                let t = i as f32 / 10.0;
+                let (a, b, d) = ((1.0 - t) * (1.0 - t), 2.0 * t * (1.0 - t), t * t);
+                at(a * -0.2 + b * -0.48 + d * -0.6, a * 0.48 + b * 0.68 + d * 0.3)
+            }).collect();
+            p.add(Shape::line(tail, Stroke::new(h * 0.14, col)));
+        }
         Icon::ChevronDown => {
             p.add(Shape::convex_polygon(vec![Pos2::new(c.x - h * 0.55, c.y - h * 0.3), Pos2::new(c.x + h * 0.55, c.y - h * 0.3), Pos2::new(c.x, c.y + h * 0.35)], col, Stroke::NONE));
         }

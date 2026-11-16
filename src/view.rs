@@ -432,7 +432,6 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
                 continue;
             }
             let y = origin.y + r as f32 * ch;
-            let x = origin.x + c as f32 * cw;
             if cell.c == ' ' || cell.c == '\0' {
                 decorate(&painter, cell, cell_rect(r, c, 1));
                 c += 1;
@@ -455,6 +454,13 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
                 }
                 let trimmed = text.trim_end();
                 if !trimmed.is_empty() {
+                    // egui snaps a galley's origin to a whole pixel but places its glyphs at
+                    // fractional advances, so a run started mid-row can land a pixel off from
+                    // the same text drawn as part of a longer run. Anchoring every run at the
+                    // row start (padded with spaces) keeps each glyph's x independent of how
+                    // the row happens to split into runs, so text doesn't jitter as it redraws.
+                    let padded = format!("{:start$}{trimmed}", "");
+                    let (x, trimmed) = (origin.x, padded.as_str());
                     let ty = y + (ch - opt.font_size * 1.25).max(0.0) / 2.0;
                     let bold = cell.flags.contains(Flags::BOLD);
                     if bold && has_code_bold() {

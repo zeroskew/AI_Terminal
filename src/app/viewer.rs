@@ -125,9 +125,19 @@ impl App {
             return;
         }
         let (msg, col) = (msg.clone(), *col);
-        egui::Area::new(egui::Id::unique("toast")).anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -44.0)).interactable(false).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("toast")).anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -44.0)).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
             egui::Frame::new().fill(CARD_HI).stroke(Stroke::new(1.0, col)).corner_radius(8).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
-                ui.label(RichText::new(msg).color(TEXT));
+                // One line when it fits the window; otherwise wrap at nearly the window's width
+                // (left alone, the area's narrow default width wraps even short messages).
+                let max_w = (ctx.content_rect().width() - 120.0).max(200.0);
+                let font = egui::TextStyle::Body.resolve(ui.style());
+                let w = ui.painter().layout_no_wrap(msg.clone(), font, TEXT).size().x;
+                if w > max_w {
+                    ui.set_width(max_w);
+                    ui.add(egui::Label::new(RichText::new(msg).color(TEXT)).wrap());
+                } else {
+                    ui.add(egui::Label::new(RichText::new(msg).color(TEXT)).extend());
+                }
             });
         });
         ctx.request_repaint_after(Duration::from_millis(250));
