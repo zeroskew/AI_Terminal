@@ -124,9 +124,22 @@ impl App {
             ui.label(RichText::new(project.display().to_string()).color(TEXT_FAINT));
             ui.add_space(16.0);
             let (def, variant) = self.default_launch();
-            if widgets::primary_button(ui, agent_icon(&def).0, &launch::launch_label(&def, variant), ACCENT, "The default session (set it in the ▼ New-session menu)").clicked() {
-                self.launch_default(&ctx, project.clone());
-            }
+            let label = launch::launch_label(&def, variant);
+            // The two buttons side by side, centred (primary_button is text width + 40).
+            let text_w = |t: &str| ui.painter().layout_no_wrap(t.to_string(), egui::FontId::new(13.5, bold()), TEXT).size().x + 40.0;
+            let gap = 10.0;
+            let total = text_w(&label) + gap + text_w("Run script");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                if widgets::primary_button(ui, agent_icon(&def).0, &label, ACCENT, "The default session (set it in the ▼ New-session menu)").clicked() {
+                    self.launch_default(&ctx, project.clone());
+                }
+                ui.add_space(gap);
+                if widgets::primary_button(ui, Icon::Prompt, "Run script", CARD_HI, "Run a script from the scripts folder in this project, in the background (Ctrl+Shift+R)").clicked() {
+                    self.open_scripts();
+                }
+            });
             ui.add_space(10.0);
             if is_home_dir(&project) {
                 ui.add_space(14.0);

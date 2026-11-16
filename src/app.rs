@@ -273,6 +273,10 @@ pub struct Settings {
     pub keep_sessions: u32,
     /// Running sessions go to an Active group at the top of the list (below Pinned).
     pub active_on_top: bool,
+    /// Close a script's panel a few seconds after it finishes successfully.
+    pub script_auto_dismiss: bool,
+    /// Script panel width and output height, once resized (None = default, output fits its text).
+    pub script_panel_size: Option<[f32; 2]>,
     /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
     /// files, so it reads as 0 there (not the struct default).
     #[serde(default)]
@@ -332,6 +336,8 @@ impl Default for Settings {
             usage_as: "plan".into(),
             keep_sessions: 20,
             active_on_top: true,
+            script_auto_dismiss: true,
+            script_panel_size: None,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
                 Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
