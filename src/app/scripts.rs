@@ -227,6 +227,10 @@ impl App {
                     if r.exit.is_none() && r.stdin.is_some() {
                         ui.horizontal(|ui| {
                             let te = ui.add(egui::TextEdit::singleline(&mut r.input).hint_text("Type an answer (Enter sends)").desired_width(ui.available_width() - 60.0));
+                            if !r.input_focused {
+                                r.input_focused = true;
+                                te.request_focus();
+                            }
                             let enter = te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                             if ui.button("Send").clicked() || enter {
                                 r.send_line();
@@ -410,6 +414,8 @@ pub(super) struct ScriptRun {
     text: (usize, String),
     exit: Option<i32>,
     input: String,
+    /// The answer box has been focused once (it takes focus when it first appears).
+    input_focused: bool,
     collapsed: bool,
     /// When the auto-dismiss countdown started (it finished successfully; a click in the panel cancels it).
     dismiss_from: Option<Instant>,
@@ -475,6 +481,7 @@ impl ScriptRun {
             text: (usize::MAX, String::new()),
             exit: None,
             input: String::new(),
+            input_focused: false,
             collapsed: false,
             dismiss_from: None,
         })
