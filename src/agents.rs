@@ -519,7 +519,7 @@ pub fn load_catalog(claude: Option<String>, codex: Option<String>, agy: Option<S
 // ---------------------------------------------------------------------------------------------
 // Transcripts: conversation ids and names
 
-fn home() -> Option<PathBuf> {
+pub fn home() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
 }
 

@@ -26,6 +26,7 @@ mod options;
 mod mcp_api;
 mod launch;
 mod model_switch;
+mod session_close;
 mod mcp_servers_ui;
 mod sidebar;
 mod topbar;
@@ -499,8 +500,10 @@ pub struct App {
     mcp_servers: Option<mcp_servers_ui::McpServersUi>,
     /// The status bar's "clear" asks first: the session it's for.
     confirm_clear: Option<u64>,
-    /// The header's model "change" dialog: the session it's for.
-    model_switch: Option<u64>,
+    /// The header's model / effort dialog.
+    model_switch: Option<model_switch::ModelSwitch>,
+    /// The sidebar's Close (of a working session) / Delete asks first.
+    confirm_close: Option<session_close::ConfirmClose>,
     /// Home's "Remove" on a project asks first: the project it's for.
     confirm_remove_project: Option<PathBuf>,
     /// Closing the window while sessions are working asks first.
@@ -545,6 +548,8 @@ pub struct App {
     next_msg: u64,
     /// Sessions that get Enter shortly (after a pasted message landed).
     enter_due: Vec<(u64, std::time::Instant)>,
+    /// Slash commands to type into a session once it's due (after an earlier command's Enter).
+    cmd_due: Vec<(u64, std::time::Instant, String)>,
     /// Taskbar badge last drawn (Some(0) = mark, Some(n) = count, None = nothing yet).
     last_badge: Option<Option<usize>>,
     /// The session the last notification was about (clicking the toast opens it).
@@ -646,6 +651,7 @@ impl App {
             mcp_servers: None,
             confirm_clear: None,
             model_switch: None,
+            confirm_close: None,
             confirm_remove_project: None,
             confirm_quit: false,
             quit_confirmed: false,
@@ -677,6 +683,7 @@ impl App {
             outbox: Vec::new(),
             next_msg: 0,
             enter_due: Vec::new(),
+            cmd_due: Vec::new(),
             last_badge: None,
             notified: None,
             last_manage: std::time::Instant::now(),
@@ -1095,7 +1102,7 @@ impl App {
             }
             CloseSession => {
                 if let Some(id) = self.active {
-                    self.close(id);
+                    self.request_close(id);
                 }
             }
             RenameSession => {
@@ -1413,7 +1420,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1496,6 +1503,7 @@ impl eframe::App for App {
         self.search_window(&ctx);
         self.clear_dialog(&ctx);
         self.model_switch_dialog(&ctx);
+        self.confirm_close_dialog(&ctx);
         self.remove_project_dialog(&ctx);
         self.quit_dialog(&ctx);
         self.show_toast(&ctx);

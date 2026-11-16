@@ -270,6 +270,7 @@ impl App {
 
         let filter = self.filter.to_lowercase();
         let mut close_req = None;
+        let mut delete_req = None;
         let mut restart_req = None;
         let mut select_req = None;
         let mut resume_req = None;
@@ -391,10 +392,14 @@ impl App {
                     }
                     widgets::paint_icon(p, Icon::Close, br.center(), 12.0, if close_resp.hovered() { TEXT } else { TEXT_DIM });
                     if close_resp.clicked() {
-                        close_req = Some(id);
+                        if row.live {
+                            close_req = Some(id);
+                        } else {
+                            delete_req = Some(id);
+                        }
                         x_clicked = true;
                     }
-                    close_resp.on_hover_text(if row.archived { "Delete from the archive" } else { "Close session" });
+                    close_resp.on_hover_text(if row.live { "Close: stop it, keep it in the list" } else { "Delete…" });
                 } else if let Some(label) = status_label(&row) {
                     p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.5), ACCENT_HI);
                 } else if n > 0 {
@@ -474,8 +479,12 @@ impl App {
                             ui.close();
                         }
                     }
-                    if ui.button(if is_archived { "Delete" } else { "Close" }).clicked() {
+                    if live && ui.button("Close").on_hover_text("Stop it; it stays in the list").clicked() {
                         close_req = Some(id);
+                        ui.close();
+                    }
+                    if ui.button("Delete…").on_hover_text("Remove it from the list and delete the conversation (asks first)").clicked() {
+                        delete_req = Some(id);
                         ui.close();
                     }
                 });
@@ -592,8 +601,10 @@ impl App {
             }
         }
         if let Some(id) = close_req {
-            self.dormant.retain(|d| d.id != id);
-            self.close(id);
+            self.request_close(id);
+        }
+        if let Some(id) = delete_req {
+            self.confirm_close = Some(super::session_close::ConfirmClose { id, delete: true });
         }
         if let Some(id) = restart_req {
             self.restart(&ctx, id);
