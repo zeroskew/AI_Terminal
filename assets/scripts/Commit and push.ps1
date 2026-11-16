@@ -33,4 +33,6 @@ git add -A
 ($msg -join "`n") | git commit -F -
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git push
-exit $LASTEXITCODE
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Write-Host "`nDONE" -ForegroundColor Green
+exit 0
