@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! AI Terminal: terminal sessions for AI CLIs with inline previews of pasted images.
 
+mod agent_install;
 mod agents;
 mod app;
 mod colortags;

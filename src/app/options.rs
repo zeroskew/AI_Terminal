@@ -97,7 +97,7 @@ impl App {
                         ui.label(RichText::new("OPTIONS").size(11.5).family(bold()).color(TEXT_DIM));
                     });
                     ui.add_space(14.0);
-                    for (p, label) in [(OptPage::General, "General"), (OptPage::Terminal, "Terminal"), (OptPage::Images, "Images"), (OptPage::Snippets, "Snippets"), (OptPage::Scripts, "Scripts"), (OptPage::Shortcuts, "Shortcuts"), (OptPage::About, "About")] {
+                    for (p, label) in [(OptPage::General, "General"), (OptPage::Terminal, "Terminal"), (OptPage::Images, "Images"), (OptPage::Snippets, "Snippets"), (OptPage::Scripts, "Scripts"), (OptPage::Agents, "Agents"), (OptPage::Shortcuts, "Shortcuts"), (OptPage::About, "About")] {
                         let sel = page_now == p;
                         let (r, resp) = ui.allocate_exact_size(Vec2::new(190.0, 34.0), Sense::click());
                         let painter = ui.painter();
@@ -133,6 +133,7 @@ impl App {
                                 OptPage::Shortcuts => self.options_shortcuts(ui),
                                 OptPage::Snippets => self.options_snippets(ui),
                                 OptPage::Scripts => self.options_scripts(ui),
+                                OptPage::Agents => self.options_agents(ui),
                                 OptPage::About => self.options_about(ui),
                             }
                         });
@@ -144,6 +145,9 @@ impl App {
             close = true;
         }
         self.options = if close { None } else { Some(page_now) };
+        if self.options != Some(OptPage::Agents) {
+            self.agent_confirm = None;
+        }
         if self.options != Some(OptPage::Scripts) {
             // Reload from disk next time the page is shown.
             self.scripts_synced = false;
@@ -369,12 +373,27 @@ impl App {
         });
         Self::opt_heading(ui, "PASTE FOLDER");
         ui.label(RichText::new(images::paste_dir().display().to_string()).color(TEXT_DIM));
-        ui.label(RichText::new("Clipboard images are saved here as paste-<hash>.png; files older than 7 days are removed at start-up.").size(12.5).color(TEXT_FAINT));
-        if ui.button("Open paste folder").clicked() {
-            let d = images::paste_dir();
-            let _ = std::fs::create_dir_all(&d);
-            let _ = std::process::Command::new("explorer.exe").arg(&d).spawn();
-        }
+        ui.label(RichText::new("Clipboard images are saved here as paste-<hash>.png. The folder is trimmed at start-up and after each pasted image: files older than the limit go, then the oldest files until it fits the size limit.").size(12.5).color(TEXT_FAINT));
+        ui.horizontal(|ui| {
+            ui.label("Keep images for");
+            ui.add(egui::DragValue::new(&mut self.s.paste_keep_days).range(0..=3650).suffix(" days")).on_hover_text("0 = keep forever");
+            ui.label(RichText::new("0 = unlimited").size(12.5).color(TEXT_FAINT));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Folder size limit");
+            ui.add(egui::DragValue::new(&mut self.s.paste_max_mb).range(0..=1_048_576).speed(16).suffix(" MB")).on_hover_text("0 = no limit; 1024 MB = 1 GB");
+            ui.label(RichText::new("0 = unlimited").size(12.5).color(TEXT_FAINT));
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Open paste folder").clicked() {
+                let d = images::paste_dir();
+                let _ = std::fs::create_dir_all(&d);
+                let _ = std::process::Command::new("explorer.exe").arg(&d).spawn();
+            }
+            if ui.button("Clean up now").on_hover_text("Apply the limits above right away").clicked() {
+                images::cleanup_async(self.s.paste_keep_days, self.s.paste_limit_bytes());
+            }
+        });
     }
 
     /// One option with a description underneath.
@@ -559,7 +578,17 @@ impl App {
         ui.add_space(12.0);
         ui.label(RichText::new("Projects with Claude / Codex / shell sessions, pasted images previewed right in the terminal, colour emoji, colour tags in Claude's replies, and sessions that resume their conversation.").size(14.5).color(TEXT));
         ui.add_space(8.0);
-        ui.label(RichText::new(format!("Pasted images are kept in {} for 7 days. Settings, hook events and logs live in %APPDATA%\\AI Terminal and %LOCALAPPDATA%\\AI_Terminal.", images::paste_dir().display())).size(12.5).color(TEXT_FAINT));
+        let days = match self.s.paste_keep_days {
+            0 => "with no age limit".to_string(),
+            1 => "for 1 day".to_string(),
+            d => format!("for {d} days"),
+        };
+        let size = match self.s.paste_max_mb {
+            0 => String::new(),
+            mb if mb % 1024 == 0 => format!(" (up to {} GB)", mb / 1024),
+            mb => format!(" (up to {mb} MB)"),
+        };
+        ui.label(RichText::new(format!("Pasted images are kept in {} {days}{size}. Settings, hook events and logs live in %APPDATA%\\AI Terminal and %LOCALAPPDATA%\\AI_Terminal.", images::paste_dir().display())).size(12.5).color(TEXT_FAINT));
         ui.add_space(8.0);
         ui.label(RichText::new("Built with Rust and egui; the terminal is alacritty_terminal on ConPTY.").size(12.5).color(TEXT_FAINT));
     }

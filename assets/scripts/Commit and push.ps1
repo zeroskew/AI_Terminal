@@ -23,7 +23,9 @@ if ($LASTEXITCODE -ne 0 -or -not $msg) {
 Write-Host ""
 $msg | ForEach-Object { Write-Host $_ -ForegroundColor Cyan }
 Write-Host ""
-if ((Read-Host "Enter = commit and push, n = cancel") -eq 'n') {
+Write-Host "Enter = commit and push, n = cancel"
+$answer = Read-Host
+if ($null -eq $answer -or $answer -eq 'n') {
     if ($new.Count) { git reset -q -- $new }
     Write-Host "Cancelled."
     exit 0

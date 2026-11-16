@@ -62,19 +62,6 @@ impl App {
         }
     }
 
-    /// The usage shown on a session's row: its share of the 5-hour plan limit, or its
-    /// estimated cost (Options > General > Sessions).
-    pub(super) fn usage_label(&self, row: &Row) -> Option<String> {
-        if !self.s.show_cost {
-            return None;
-        }
-        if self.s.usage_as == "plan" {
-            row.plan.map(fmt_plan)
-        } else {
-            row.cost.map(crate::cost::fmt_usd)
-        }
-    }
-
     pub(super) fn rows(&self, p: &Path) -> Vec<Row> {
         let mut v: Vec<Row> = self
             .tabs
@@ -94,8 +81,6 @@ impl App {
             attention: t.sess.attention.is_some(),
             busy: t.sess.busy && t.sess.exited.is_none(),
             attention_msg: t.sess.attention.clone(),
-            cost: t.sess.cost.map(|c| c.usd),
-            plan: t.sess.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).map(|p| p.five_hour),
             pin: t.pin,
             archived: false,
             })
@@ -114,8 +99,6 @@ impl App {
             attention: false,
             busy: false,
             attention_msg: None,
-            cost: d.saved.cost,
-            plan: d.saved.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).map(|p| p.five_hour),
             pin: d.saved.pin,
             archived: d.saved.archived,
         }));
@@ -252,14 +235,14 @@ impl App {
         let ctx = ui.ctx().clone();
         let project = self.current_project();
         ui.add_space(10.0);
-        // New session split button: main part = the default (Claude), ▼ = the full menu.
-        let def = self.default_profile();
-        let label = if def.is_agent() { format!("New {} session", def.name) } else { format!("New Shell ({})", def.name) };
-        let (main, arrow) = widgets::split_button(ui, Some(agent_icon(&def).0), &label, ACCENT, 34.0);
-        if main.on_hover_text("Ctrl+N  (Ctrl+Shift+N: unrestricted)").clicked() {
-            self.new_default(&ctx, project.clone(), def.clone(), false);
+        // New session split button: main part = the default row of the menu, ▼ = the full menu.
+        let (def, variant) = self.default_launch();
+        let (main, arrow) = widgets::split_button(ui, Some(agent_icon(&def).0), &launch::launch_label(&def, variant), ACCENT, 34.0);
+        if main.on_hover_text("The default session: hover a row in the ▼ menu and click \"set as default\" to change it.\nCtrl+N: new Claude session  (Ctrl+Shift+N: unrestricted)").clicked() {
+            self.launch_default(&ctx, project.clone());
         }
-        egui::Popup::menu(&arrow).show(|ui| self.new_session_menu(ui, &ctx, &project));
+        // Closes on a click outside; the launch rows close it themselves, "set as default" keeps it open.
+        egui::Popup::menu(&arrow).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_session_menu(ui, &ctx, &project));
         ui.add_space(12.0);
 
         let rows = self.rows(&project);
@@ -372,8 +355,22 @@ impl App {
                     Color32::from_rgb(196, 200, 208)
                 };
                 let font = egui::FontId::new(13.0, if selected { bold() } else { egui::FontFamily::Proportional });
+                // The name gets everything left of what's drawn on the right (status or image
+                // count; the close button on hover), plus a small gap.
+                let small = egui::FontId::proportional(11.5);
+                let text_w = |s: String| ui.fonts_mut(|f| f.layout_no_wrap(s, small.clone(), TEXT_DIM).size().x);
+                let right_w = if hovered {
+                    26.0
+                } else if let Some(label) = status_label(&row) {
+                    text_w(label.to_string())
+                } else {
+                    if row.images > 0 { text_w(row.images.to_string()) + 21.0 } else { 0.0 }
+                };
                 let mut job = egui::text::LayoutJob::simple_singleline(name.clone(), font, col);
-                job.wrap.max_width = rect.width() - if status_label(&row).is_some() && !hovered { 120.0 } else if self.usage_label(&row).is_some() { 110.0 } else { 80.0 };
+                // Nothing on the right: let the name run almost to the row's edge.
+                // The right-hand items end 10 px from the edge (the close button's box 4 px).
+                let reserve = if hovered { 28.0 } else if right_w > 0.0 { right_w + 16.0 } else { 10.0 };
+                job.wrap.max_width = rect.width() - 34.0 - reserve;
                 job.wrap.max_rows = 1;
                 job.wrap.break_anywhere = true;
                 let g = ui.fonts_mut(|f| f.layout_job(job));
@@ -396,17 +393,10 @@ impl App {
                     close_resp.on_hover_text(if row.archived { "Delete from the archive" } else { "Close session" });
                 } else if let Some(label) = status_label(&row) {
                     p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.5), ACCENT_HI);
-                } else {
-                    let mut x = rect.right() - 10.0;
-                    if let Some(label) = self.usage_label(&row) {
-                        let g = p.layout_no_wrap(label, egui::FontId::proportional(11.5), TEXT_DIM);
-                        p.galley(egui::pos2(x - g.size().x, rect.center().y - g.size().y / 2.0), g.clone(), TEXT_DIM);
-                        x -= g.size().x + 8.0;
-                    }
-                    if n > 0 {
-                        p.text(egui::pos2(x, rect.center().y), egui::Align2::RIGHT_CENTER, n.to_string(), egui::FontId::proportional(11.5), TEXT_DIM);
-                        widgets::paint_icon(p, Icon::Image, egui::pos2(x - 15.0, rect.center().y), 12.0, TEXT_DIM);
-                    }
+                } else if n > 0 {
+                    let x = rect.right() - 10.0;
+                    p.text(egui::pos2(x, rect.center().y), egui::Align2::RIGHT_CENTER, n.to_string(), egui::FontId::proportional(11.5), TEXT_DIM);
+                    widgets::paint_icon(p, Icon::Image, egui::pos2(x - 15.0, rect.center().y), 12.0, TEXT_DIM);
                 }
                 if resp.clicked() && !x_clicked {
                     if row.live {

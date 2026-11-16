@@ -20,6 +20,7 @@ use crate::{keys, mcp, plugins};
 
 mod plugins_ui;
 mod scripts;
+mod agents_ui;
 mod snippets;
 mod options;
 mod mcp_api;
@@ -116,9 +117,6 @@ struct Row {
     busy: bool,
     /// Why it needs you (Claude's message), when it does.
     attention_msg: Option<String>,
-    cost: Option<f64>,
-    /// Share of the 5-hour plan limit, in percentage points.
-    plan: Option<f64>,
     pin: u32,
     /// In the Archived group.
     archived: bool,
@@ -152,9 +150,30 @@ struct LaunchDialog {
     restart: Option<u64>,
 }
 
-/// A row in the New-session menu: icon + label.
-fn menu_item(ui: &mut Ui, icon: (Icon, Color32), label: &str) -> bool {
-    menu_row(ui, icon, label, false).clicked()
+/// A launch row that can be the default (what the New-session button runs): "default" at the
+/// right of the default row, a "set as default" link there on the others while hovered.
+/// Returns (row clicked, "set as default" clicked).
+fn menu_item_default(ui: &mut Ui, icon: (Icon, Color32), label: &str, is_default: bool) -> (bool, bool) {
+    let resp = menu_row(ui, icon, label, false);
+    let r = resp.rect;
+    let font = egui::FontId::proportional(12.5);
+    let at = egui::pos2(r.right() - 12.0, r.center().y);
+    if is_default {
+        ui.painter().text(at, egui::Align2::RIGHT_CENTER, "default", font, TEXT_FAINT);
+        return (resp.clicked(), false);
+    }
+    if !resp.contains_pointer() {
+        return (resp.clicked(), false);
+    }
+    let size = ui.painter().layout_no_wrap("set as default".into(), font.clone(), LINK).size();
+    let lr = egui::Rect::from_min_size(egui::pos2(at.x - size.x, at.y - size.y / 2.0), size);
+    let link = ui.interact(lr.expand(4.0), resp.id.with("set_default"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let col = if link.hovered() { Color32::WHITE } else { LINK };
+    ui.painter().text(at, egui::Align2::RIGHT_CENTER, "set as default", font, col);
+    if link.hovered() {
+        ui.painter().hline(lr.x_range(), lr.bottom(), Stroke::new(1.0, col));
+    }
+    (resp.clicked(), link.clicked())
 }
 
 /// A menu row; `submenu` draws a right arrow (pair it with `egui::containers::menu::SubMenu`).
@@ -162,11 +181,13 @@ fn menu_row(ui: &mut Ui, (icon, col): (Icon, Color32), label: &str, submenu: boo
     let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(300.0), 30.0), Sense::click());
     use egui::containers::menu::{MenuState, SubMenu};
     let open = submenu && MenuState::from_ui(ui, |s, _| s.open_item == Some(SubMenu::id_from_widget_id(resp.id)));
-    if resp.hovered() || open {
+    // contains_pointer: stays lit while the pointer is on the row's "set as default" link.
+    let hot = resp.hovered() || open || (!submenu && resp.contains_pointer());
+    if hot {
         ui.painter().rect_filled(r, 4.0, CARD_HI);
     }
     widgets::paint_icon(ui.painter(), icon, egui::pos2(r.left() + 16.0, r.center().y), 15.0, col);
-    let fg = if resp.hovered() || open { Color32::WHITE } else { TEXT };
+    let fg = if hot { Color32::WHITE } else { TEXT };
     ui.painter().text(egui::pos2(r.left() + 36.0, r.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), fg);
     if submenu {
         let a = egui::Rect::from_center_size(egui::pos2(r.right() - 14.0, r.center().y), Vec2::splat(10.0));
@@ -175,15 +196,15 @@ fn menu_row(ui: &mut Ui, (icon, col): (Icon, Color32), label: &str, submenu: boo
     resp
 }
 
-/// Claude's orange asterisk, Codex's knot, a four-point star per other agent, a prompt for shells.
+/// Each agent's logo (Claude's orange asterisk, Codex's knot, ...), a prompt for shells.
 fn agent_icon(p: &Profile) -> (Icon, Color32) {
     match p.kind {
         Kind::Claude => (Icon::Sparkle, Color32::from_rgb(217, 119, 87)),
         Kind::Codex => (Icon::Codex, Color32::from_rgb(200, 204, 212)),
-        Kind::Gemini => (Icon::Star, Color32::from_rgb(110, 155, 245)),
-        Kind::Qwen => (Icon::Star, Color32::from_rgb(160, 130, 240)),
-        Kind::OpenCode => (Icon::Star, Color32::from_rgb(235, 235, 235)),
-        Kind::Kimi => (Icon::Star, Color32::from_rgb(90, 200, 220)),
+        Kind::Antigravity => (Icon::Antigravity, Color32::from_rgb(110, 155, 245)),
+        Kind::Qwen => (Icon::Qwen, Color32::from_rgb(118, 108, 240)),
+        Kind::OpenCode => (Icon::OpenCode, Color32::from_rgb(235, 235, 235)),
+        Kind::Kimi => (Icon::Kimi, Color32::from_rgb(235, 235, 235)),
         Kind::Shell => (Icon::Prompt, Color32::from_rgb(78, 201, 176)),
     }
 }
@@ -196,6 +217,8 @@ pub struct Settings {
     pub reopen_sessions: bool,
     pub selected_project: Option<PathBuf>,
     pub default_profile: String,
+    /// Which row of that profile is the default: "" (plain), "unrestricted" or "settings".
+    pub default_variant: String,
     pub font_size: f32,
     pub ui_size: f32,
     pub code_font: String,
@@ -206,6 +229,9 @@ pub struct Settings {
     pub preview_over_text: bool,
     pub shift_enter_alt: bool,
     pub show_image_strip: bool,
+    /// Paste folder limits: days to keep pasted images and folder size in MB (0 = unlimited).
+    pub paste_keep_days: u32,
+    pub paste_max_mb: u32,
     pub term_theme: term_theme::TermTheme,
     pub last_claude_opts: LaunchOpts,
     pub last_codex_opts: LaunchOpts,
@@ -253,6 +279,13 @@ pub struct Settings {
     pub version: u32,
 }
 
+impl Settings {
+    /// The paste folder size cap in bytes (0 = unlimited).
+    pub fn paste_limit_bytes(&self) -> u64 {
+        self.paste_max_mb as u64 * 1024 * 1024
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Settings {
@@ -261,6 +294,7 @@ impl Default for Settings {
             reopen_sessions: true,
             selected_project: None,
             default_profile: crate::session::CLAUDE.into(),
+            default_variant: String::new(),
             font_size: 15.0,
             ui_size: 14.0,
             code_font: crate::fonts::DEFAULT_LIST.into(),
@@ -270,6 +304,8 @@ impl Default for Settings {
             preview_over_text: false,
             shift_enter_alt: true,
             show_image_strip: true,
+            paste_keep_days: 30,
+            paste_max_mb: 1024,
             term_theme: Default::default(),
             last_claude_opts: Default::default(),
             last_codex_opts: Default::default(),
@@ -334,6 +370,7 @@ enum OptPage {
     Images,
     Snippets,
     Scripts,
+    Agents,
     Shortcuts,
     About,
 }
@@ -413,6 +450,8 @@ pub struct App {
     active: Option<u64>,
     next_id: u64,
     profiles: Vec<Profile>,
+    /// When `profiles` was last detected (the New-session menu re-checks, throttled).
+    profiles_at: std::time::Instant,
     cache: ImageCache,
     viewer: Option<Viewer>,
     renaming: Option<(u64, String)>,
@@ -438,9 +477,20 @@ pub struct App {
     model_switch: Option<u64>,
     /// Home's "Remove" on a project asks first: the project it's for.
     confirm_remove_project: Option<PathBuf>,
+    /// Closing the window while sessions are working asks first.
+    confirm_quit: bool,
+    /// "Close Anyway" was picked: let the next close request through.
+    quit_confirmed: bool,
     /// Plan usage limits (5-hour / weekly) from Claude's status line, and when they were read.
     limits: Option<crate::hooks::Limits>,
     limits_read: Option<(std::time::Instant, Option<std::time::SystemTime>)>,
+    /// Codex's plan limits (read while a Codex session is active) and when they were read.
+    codex_limits: Vec<agents::LimitWindow>,
+    codex_limits_read: Option<std::time::Instant>,
+    /// Antigravity's quota (`agy -p /usage`, run on a thread while an Antigravity session is
+    /// active) and when it was last asked for.
+    agy_quota: std::sync::Arc<std::sync::Mutex<Vec<agents::AgyQuota>>>,
+    agy_quota_asked: Option<std::time::Instant>,
     /// Each conversation's share of the plan limits (conversation id → share), and its file time.
     plan_usage: std::collections::HashMap<String, crate::hooks::PlanShare>,
     plan_usage_read: Option<std::time::SystemTime>,
@@ -459,6 +509,12 @@ pub struct App {
     script_drafts: Vec<scripts::ScriptDraft>,
     scripts_synced: bool,
     script_new_ext: String,
+    /// Scripts running (or finished, until closed) in the background, each in a small panel.
+    script_runs: Vec<scripts::ScriptRun>,
+    /// Options > Agents: installed copies of the agent CLIs (rescanned every few seconds).
+    agent_installs: Option<(std::time::Instant, Vec<crate::agent_install::Installation>)>,
+    /// The copy whose Uninstall was clicked once (the second click confirms).
+    agent_confirm: Option<PathBuf>,
     outbox: Vec<Pending>,
     next_msg: u64,
     /// Sessions that get Enter shortly (after a pasted message landed).
@@ -527,7 +583,7 @@ impl App {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
             s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true });
         }
-        std::thread::spawn(|| images::cleanup(Duration::from_secs(7 * 24 * 3600)));
+        images::cleanup_async(s.paste_keep_days, s.paste_limit_bytes());
         let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
             let img = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
             cc.egui_ctx.load_texture("app_logo", img, egui::TextureOptions::LINEAR)
@@ -542,6 +598,7 @@ impl App {
             active: None,
             next_id: 1,
             profiles: Profile::detect(),
+            profiles_at: std::time::Instant::now(),
             cache: ImageCache::new(),
             viewer: None,
             renaming: None,
@@ -560,8 +617,14 @@ impl App {
             confirm_clear: None,
             model_switch: None,
             confirm_remove_project: None,
+            confirm_quit: false,
+            quit_confirmed: false,
             limits: None,
             limits_read: None,
+            codex_limits: Vec::new(),
+            codex_limits_read: None,
+            agy_quota: Default::default(),
+            agy_quota_asked: None,
             plan_usage: Default::default(),
             plan_usage_read: None,
             mcp: None,
@@ -578,6 +641,9 @@ impl App {
             script_drafts: Vec::new(),
             scripts_synced: false,
             script_new_ext: "ps1".into(),
+            script_runs: Vec::new(),
+            agent_installs: None,
+            agent_confirm: None,
             outbox: Vec::new(),
             next_msg: 0,
             enter_due: Vec::new(),
@@ -672,6 +738,7 @@ impl App {
                     "shortcuts" => OptPage::Shortcuts,
                     "snippets" => OptPage::Snippets,
                     "scripts" => OptPage::Scripts,
+                    "agents" => OptPage::Agents,
                     "about" => OptPage::About,
                     _ => OptPage::Terminal,
                 });
@@ -902,6 +969,7 @@ impl App {
             match images::save_clipboard_image(&img) {
                 Ok(p) => {
                     self.cache.forget(&p);
+                    images::cleanup_async(self.s.paste_keep_days, self.s.paste_limit_bytes());
                     (images::quote(&p), vec![p], "image")
                 }
                 Err(e) => return self.toast(e, RED, ctx),
@@ -979,8 +1047,8 @@ impl App {
                 }
             }
             NewDefault => {
-                let (p, pr) = (self.current_project(), self.default_profile());
-                self.new_default(ctx, p, pr, false);
+                let p = self.current_project();
+                self.launch_default(ctx, p);
             }
             CloseSession => {
                 if let Some(id) = self.active {
@@ -1094,6 +1162,13 @@ impl App {
             if ctx.input(|i| i.viewport().minimized) == Some(true) && winsys::is_main_visible() {
                 winsys::hide_main();
             }
+        }
+        // Really closing (no tray, or Quit from the tray) with work in flight: ask first.
+        let to_tray = self.s.minimize_to_tray && !winsys::QUITTING.load(std::sync::atomic::Ordering::Relaxed);
+        if !to_tray && !self.quit_confirmed && ctx.input(|i| i.viewport().close_requested()) && self.busy_count() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            winsys::show_main();
+            self.confirm_quit = true;
         }
         for e in winsys::take_events() {
             if e == winsys::TrayEvent::NotificationClicked {
@@ -1294,7 +1369,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_remove_project.is_some() || self.snippets_open || self.scripts_open;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1371,12 +1446,65 @@ impl eframe::App for App {
         self.launch_dialog(&ctx);
         self.snippets_palette(&ctx);
         self.scripts_palette(&ctx);
+        self.script_runs_ui(&ctx);
         self.plugins_window(&ctx);
         self.mcp_servers_window(&ctx);
         self.clear_dialog(&ctx);
         self.model_switch_dialog(&ctx);
         self.remove_project_dialog(&ctx);
+        self.quit_dialog(&ctx);
         self.show_toast(&ctx);
+    }
+}
+
+impl App {
+    /// Sessions still working on a task.
+    fn busy_count(&self) -> usize {
+        self.tabs.iter().filter(|t| t.sess.busy && t.sess.exited.is_none()).count()
+    }
+
+    /// "There is a running task": Cancel | Close Anyway.
+    fn quit_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_quit {
+            return;
+        }
+        let busy = self.busy_count();
+        let mut choice: Option<bool> = None;
+        let m = egui::Modal::new(egui::Id::unique("confirm_quit")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(20)).show(ctx, |ui| {
+            ui.set_width(460.0);
+            let title = if busy == 1 { "There is a running task".to_string() } else { format!("There are {busy} running tasks") };
+            ui.label(RichText::new(title).size(18.0).family(bold()).color(Color32::WHITE));
+            ui.add_space(10.0);
+            let names: Vec<String> = self.tabs.iter().filter(|t| t.sess.busy && t.sess.exited.is_none()).map(|t| t.sess.display_name()).collect();
+            for n in &names {
+                ui.label(RichText::new(format!("• {n}")).color(ORANGE));
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new("Closing AI Terminal now will stop it.").color(TEXT));
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("Close Anyway").color(Color32::WHITE)).fill(RED).min_size(Vec2::new(110.0, 28.0))).clicked() {
+                    choice = Some(true);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(70.0, 28.0))).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if m.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        if let Some(close) = choice {
+            self.confirm_quit = false;
+            if close {
+                self.quit_confirmed = true;
+                // Past minimize-to-tray too: this is a real quit.
+                winsys::QUITTING.store(true, std::sync::atomic::Ordering::Relaxed);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                winsys::QUITTING.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 }
 

@@ -304,6 +304,32 @@ mod imp {
         }
     }
 
+    // ---- PATH ------------------------------------------------------------------------------------
+
+    /// The PATH as the registry has it now (machine, then user; %VARS% expanded). Installers
+    /// (npm, uv, …) add folders there, which a running process never sees in its own PATH.
+    pub fn registry_path() -> Vec<std::path::PathBuf> {
+        const MACHINE: PCWSTR = w!("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment");
+        let read = |root: HKEY, sub: PCWSTR| -> Option<String> {
+            unsafe {
+                let mut size = 0u32;
+                // RRF_RT_REG_EXPAND_SZ values are expanded unless RRF_NOEXPAND is given.
+                let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ;
+                RegGetValueW(root, sub, w!("Path"), flags, None, None, Some(&mut size)).ok().ok()?;
+                let mut buf = vec![0u16; size as usize / 2 + 1];
+                let mut size = (buf.len() * 2) as u32;
+                RegGetValueW(root, sub, w!("Path"), flags, None, Some(buf.as_mut_ptr() as *mut _), Some(&mut size)).ok().ok()?;
+                let n = (size as usize / 2).saturating_sub(1).min(buf.len());
+                Some(String::from_utf16_lossy(&buf[..n]))
+            }
+        };
+        [read(HKEY_LOCAL_MACHINE, MACHINE), read(HKEY_CURRENT_USER, w!("Environment"))]
+            .into_iter()
+            .flatten()
+            .flat_map(|s| s.split(';').map(str::trim).filter(|d| !d.is_empty()).map(std::path::PathBuf::from).collect::<Vec<_>>())
+            .collect()
+    }
+
     // ---- memory ----------------------------------------------------------------------------------
 
     /// Memory in use on the machine, in GB.
@@ -399,5 +425,12 @@ mod tests {
             assert!(root.is_dir());
         }
         assert!(super::package_root("No.Such.Package_").is_none());
+    }
+
+    #[test]
+    fn registry_path_is_expanded_and_has_system32() {
+        let dirs = super::registry_path();
+        assert!(dirs.iter().all(|d| !d.to_string_lossy().contains('%')), "{dirs:?}");
+        assert!(dirs.iter().any(|d| d.to_string_lossy().to_lowercase().ends_with("system32")), "{dirs:?}");
     }
 }
