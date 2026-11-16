@@ -9,6 +9,7 @@ impl App {
         let mut open: Option<PathBuf> = None;
         let mut set_tab: Option<(PathBuf, bool)> = None;
         let mut remove: Option<PathBuf> = None;
+        let mut rename: Option<PathBuf> = None;
         let tab_order = self.tab_projects();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
             ui.add_space(24.0);
@@ -54,17 +55,23 @@ impl App {
                             {
                                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(ctl).layout(Layout::right_to_left(Align::Center)));
                                 ui.spacing_mut().item_spacing.x = 10.0;
-                                // Painted by hand so the text can turn red on hover.
-                                let g = ui.painter().layout_no_wrap("Remove".into(), egui::FontId::proportional(12.0), TEXT_DIM);
-                                let (rr, rm) = ui.allocate_exact_size(g.size() + Vec2::new(8.0, 4.0), Sense::click());
-                                if rm.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    ui.painter().rect_filled(rr, 4.0, RED.gamma_multiply(0.18));
-                                    ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0, RED), egui::StrokeKind::Inside);
-                                }
-                                ui.painter().galley_with_override_text_color(rr.center() - g.size() / 2.0, g, if rm.hovered() { RED } else { TEXT_DIM });
-                                if rm.on_hover_text("Remove this project from AI Terminal (asks first; files are not deleted)").clicked() {
+                                // Text links painted by hand so they can take a colour on hover.
+                                let link = |ui: &mut Ui, text: &str, hover: Color32| {
+                                    let g = ui.painter().layout_no_wrap(text.into(), egui::FontId::proportional(12.0), TEXT_DIM);
+                                    let (rr, r) = ui.allocate_exact_size(g.size() + Vec2::new(8.0, 4.0), Sense::click());
+                                    if r.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        ui.painter().rect_filled(rr, 4.0, hover.gamma_multiply(0.18));
+                                        ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0, hover), egui::StrokeKind::Inside);
+                                    }
+                                    ui.painter().galley_with_override_text_color(rr.center() - g.size() / 2.0, g, if r.hovered() { hover } else { TEXT_DIM });
+                                    r
+                                };
+                                if link(ui, "Remove", RED).on_hover_text("Remove this project from AI Terminal (asks first; files are not deleted)").clicked() {
                                     remove = Some(proj.path.clone());
+                                }
+                                if link(ui, "Rename", ACCENT_HI).on_hover_text("Rename this project (only its name in AI Terminal; the folder is not renamed)").clicked() {
+                                    rename = Some(proj.path.clone());
                                 }
                                 let cb = ui.checkbox(&mut shown, RichText::new("Show in tabs").size(12.0).color(TEXT_DIM));
                                 if cb.on_hover_text("Show this project as a tab in the top bar. Unticking only closes the tab; the project stays here.").changed() {
@@ -102,6 +109,9 @@ impl App {
         }
         if let Some(p) = remove {
             self.confirm_remove_project = Some(p);
+        } else if let Some(p) = rename {
+            let name = self.s.projects.iter().find(|x| x.path == p).map(|x| x.name.clone()).unwrap_or_default();
+            self.renaming_project = Some((p, name));
         } else if let Some(p) = open.filter(|_| !toggled) {
             self.select_project(Some(p));
         }
