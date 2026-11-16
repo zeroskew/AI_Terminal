@@ -4,6 +4,16 @@ A Windows terminal for AI CLI sessions (Claude Code, Codex, Antigravity CLI, Qwe
 Kimi CLI, shells), with **previews of pasted
 images inside the terminal**.
 
+![A Claude Code session in AI Terminal](screenshots/main.png)
+
+| Claude, Codex and other agents, each with model and settings variants | New session with settings |
+|---|---|
+| ![New session menu](screenshots/agents-menu.png) | ![New Claude session dialog](screenshots/new-session.png) |
+| **Search across session transcripts** | **Options** |
+| ![Search window](screenshots/search.png) | ![Options, General page](screenshots/options.png) |
+
+![Home: all projects](screenshots/home.png)
+
 ## Features
 
 - **Layout**: project tabs across the top (Home + a tab per project ticked **Show in tabs**;

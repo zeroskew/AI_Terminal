@@ -548,6 +548,8 @@ pub struct App {
     hex_edit: std::collections::HashMap<String, String>,
     /// The sidebar's Archived group is expanded.
     show_archived: bool,
+    /// Test hook (`--new-menu`): open the New session ▼ menu on the next frame.
+    open_new_menu: bool,
     /// The Search window (open while Some).
     search_ui: Option<search_ui::SearchUi>,
 }
@@ -670,6 +672,7 @@ impl App {
             catalog_loading: Default::default(),
             hex_edit: Default::default(),
             show_archived: false,
+            open_new_menu: std::env::args().any(|a| a == "--new-menu"),
             search_ui: None,
         };
         let ctx = cc.egui_ctx.clone();

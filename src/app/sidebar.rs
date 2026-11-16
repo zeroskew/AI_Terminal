@@ -242,7 +242,11 @@ impl App {
             self.launch_default(&ctx, project.clone());
         }
         // Closes on a click outside; the launch rows close it themselves, "set as default" keeps it open.
-        egui::Popup::menu(&arrow).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| self.new_session_menu(ui, &ctx, &project));
+        let mut popup = egui::Popup::menu(&arrow).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        if std::mem::take(&mut self.open_new_menu) {
+            popup = popup.open_memory(egui::SetOpenCommand::Bool(true));
+        }
+        popup.show(|ui| self.new_session_menu(ui, &ctx, &project));
         ui.add_space(12.0);
 
         let rows = self.rows(&project);
