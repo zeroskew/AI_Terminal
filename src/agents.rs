@@ -347,6 +347,8 @@ pub struct Catalog {
     pub claude_models: Vec<ModelInfo>,
     pub claude_efforts: Vec<String>,
     pub codex_models: Vec<ModelInfo>,
+    /// From `agy models` (only the script model picker uses it so far).
+    pub agy_models: Vec<ModelInfo>,
 }
 
 impl Catalog {
@@ -358,6 +360,46 @@ impl Catalog {
             _ => &[],
         }
     }
+
+    /// The effort levels an agent offers for `model` (the model's own list when known, else
+    /// Claude's `--effort` list, else every level the agent's models report).
+    pub fn efforts(&self, kind: Kind, model: Option<&str>) -> Vec<String> {
+        if !kind.has_effort() {
+            return Vec::new();
+        }
+        let models = self.models(kind);
+        if let Some(m) = model.and_then(|id| models.iter().find(|x| x.id == id)).filter(|m| !m.efforts.is_empty()) {
+            return m.efforts.clone();
+        }
+        if kind == Kind::Claude {
+            return if self.claude_efforts.is_empty() { CLAUDE_EFFORTS.iter().map(|s| s.to_string()).collect() } else { self.claude_efforts.clone() };
+        }
+        let mut all: Vec<String> = Vec::new();
+        for e in models.iter().flat_map(|m| &m.efforts) {
+            if !all.contains(e) {
+                all.push(e.clone());
+            }
+        }
+        all
+    }
+
+    /// The model's default effort, when the CLI reports one (Codex).
+    pub fn default_effort(&self, kind: Kind, model: Option<&str>) -> Option<String> {
+        model.and_then(|id| self.models(kind).iter().find(|x| x.id == id)).and_then(|m| m.default_effort.clone())
+    }
+}
+
+/// Claude Code's effort levels, when `claude --help` couldn't be read.
+const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The effort Claude Code falls back to without `--effort`: `effortLevel` from the settings
+/// (local, then project, then user; `/effort` saves it in the user settings).
+pub fn claude_settings_effort(cwd: &Path) -> Option<String> {
+    let user = home().map(|h| h.join(".claude").join("settings.json"));
+    [Some(cwd.join(".claude").join("settings.local.json")), Some(cwd.join(".claude").join("settings.json")), user].into_iter().flatten().find_map(|f| {
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).ok()?).ok()?;
+        v["effortLevel"].as_str().filter(|e| !e.is_empty()).map(str::to_string)
+    })
 }
 
 fn run_quiet(program: &str, args: &[&str]) -> Option<String> {
@@ -449,7 +491,17 @@ pub fn claude_models(help_models: &[String], efforts: &[String]) -> Vec<ModelInf
         .collect()
 }
 
-pub fn load_catalog(claude: Option<String>, codex: Option<String>) -> Catalog {
+/// Parses `agy models`: one `id<TAB>name` line per model (other lines are progress text).
+pub fn parse_agy_models(out: &str) -> Vec<ModelInfo> {
+    out.lines()
+        .filter_map(|l| {
+            let (id, label) = l.trim().split_once('\t')?;
+            (!id.is_empty() && !id.contains(' ')).then(|| ModelInfo { id: id.into(), label: label.trim().into(), efforts: Vec::new(), default_effort: None })
+        })
+        .collect()
+}
+
+pub fn load_catalog(claude: Option<String>, codex: Option<String>, agy: Option<String>) -> Catalog {
     let mut c = Catalog::default();
     // The aliases are listed even when `claude --help` can't be read.
     let (models, efforts) = claude.and_then(|p| run_quiet(&p, &["--help"])).map(|h| parse_claude_help(&h)).unwrap_or_default();
@@ -457,6 +509,9 @@ pub fn load_catalog(claude: Option<String>, codex: Option<String>) -> Catalog {
     c.claude_efforts = efforts;
     if let Some(json) = codex.and_then(|p| run_quiet(&p, &["debug", "models"])) {
         c.codex_models = parse_codex_models(&json);
+    }
+    if let Some(out) = agy.and_then(|p| run_quiet(&p, &["models"])) {
+        c.agy_models = parse_agy_models(&out);
     }
     c
 }
@@ -1115,5 +1170,13 @@ mod tests {
         let ids: Vec<&str> = m.iter().map(|x| x.id.as_str()).collect();
         assert_eq!(ids, vec!["fable", "opus", "sonnet", "haiku", "mythos"]);
         assert_eq!(m[1].label, "Opus (latest)");
+    }
+
+    #[test]
+    fn agy_model_list() {
+        let m = parse_agy_models("Fetching available models...\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n");
+        let ids: Vec<&str> = m.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["gemini-3.8-flash-low", "claude-opus-5-5-high"]);
+        assert_eq!(m[0].label, "Gemini 3.8 Flash (Low)");
     }
 }

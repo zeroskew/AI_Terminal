@@ -276,6 +276,9 @@ pub struct Settings {
     pub active_on_top: bool,
     /// Close a script's panel a few seconds after it finishes successfully.
     pub script_auto_dismiss: bool,
+    /// The AI model per script (key: lowercase file name, e.g. "commit and push.ps1"), passed to it
+    /// as AI_TERMINAL_CLI / AI_TERMINAL_MODEL / AI_TERMINAL_EFFORT. No entry = the script's own default.
+    pub script_models: std::collections::HashMap<String, ScriptModel>,
     /// Script panel width and output height, once resized (None = default, output fits its text).
     pub script_panel_size: Option<[f32; 2]>,
     /// Search window: every session (else the current one), and how many days back (0 = all).
@@ -341,6 +344,7 @@ impl Default for Settings {
             keep_sessions: 20,
             active_on_top: true,
             script_auto_dismiss: true,
+            script_models: Default::default(),
             script_panel_size: None,
             search_all: true,
             search_days: 0,
@@ -363,6 +367,16 @@ struct Tab {
     bell: bool,
     sess: Session,
     view: ViewState,
+}
+
+/// The AI a script should use (Options > Scripts): "claude", "codex" or "antigravity", a model
+/// id and an effort level ("" = the model's default).
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct ScriptModel {
+    pub cli: String,
+    pub model: String,
+    pub effort: String,
 }
 
 /// A saved prompt / command (Options > Snippets).

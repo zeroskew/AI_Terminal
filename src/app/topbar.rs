@@ -243,22 +243,24 @@ impl App {
         let cost_pill = tab.sess.cost.filter(|_| self.s.show_cost);
         let plan_pill = if self.s.usage_as == "plan" { Some(tab.sess.agent_id.as_ref().and_then(|a| self.plan_usage.get(a)).copied()) } else { None };
         let attention_pill = tab.sess.attention.clone();
-        // The model actually answering (from the transcript) goes in the profile pill; the
-        // launch options pill then only adds the effort.
+        // The model actually answering (from the transcript) goes in the profile pill, else the
+        // launch model gets its own; the effort has its own pill (click to change).
         let live_model = tab.sess.model.clone();
-        let model_pill = if live_model.is_some() {
-            tab.sess.opts.effort.clone().map(|e| format!("effort {e}"))
-        } else {
-            tab.sess.opts.model.clone().map(|m| match &tab.sess.opts.effort {
-                Some(e) => format!("{m} · {e}"),
-                None => m,
-            })
-        };
+        let model_pill = if live_model.is_some() { None } else { tab.sess.opts.model.clone() };
+        let kind = tab.sess.profile.kind;
+        let effort_pill = kind.has_effort().then(|| {
+            let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
+            let model = tab.sess.opts.model.clone().or_else(|| live_model.clone());
+            let levels = catalog.efforts(kind, model.as_deref());
+            let default = catalog.default_effort(kind, model.as_deref());
+            (tab.sess.effort(), default, levels)
+        });
         let ctx = ui.ctx().clone();
         let mut open: Option<PathBuf> = None;
         let mut restart = false;
         let mut compact = false;
         let mut change_model = false;
+        let mut set_effort: Option<String> = None;
         // Claude and Codex both have /model and /compact.
         let is_codex = tab.sess.profile.kind == Kind::Codex;
         let can_compact = exited.is_none() && (tab.sess.profile.kind == Kind::Claude || is_codex);
@@ -314,6 +316,45 @@ impl App {
             }
             if let Some(m) = &model_pill {
                 widgets::pill(ui, m, TEXT_DIM, CARD_HI);
+            }
+            if let Some((cur, default, levels)) = &effort_pill {
+                let text = match (cur, default) {
+                    (Some(e), _) => format!("effort {e}"),
+                    (None, Some(d)) => format!("effort {d} (default)"),
+                    (None, None) => "effort auto".to_string(),
+                };
+                let pill = widgets::pill(ui, &text, TEXT_DIM, CARD_HI);
+                if exited.is_some() {
+                    pill.on_hover_text("Reasoning effort");
+                } else {
+                    let resp = ui.interact(pill.rect, ui.auto_id_with("effort_pill"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.hovered() {
+                        ui.painter().rect_stroke(pill.rect, pill.rect.height() / 2.0, Stroke::new(1.0, LINK), egui::StrokeKind::Inside);
+                    }
+                    let resp = resp.on_hover_text(if is_codex {
+                        "Reasoning effort of the current turn. Click to change it (opens Codex's /model picker)."
+                    } else {
+                        "Reasoning effort. Click to change it (sends /effort; Claude Code also saves it as your default, except max)."
+                    });
+                    if is_codex {
+                        if resp.clicked() {
+                            change_model = true;
+                        }
+                    } else {
+                        egui::Popup::menu(&resp).show(|ui| {
+                            if ui.selectable_label(cur.is_none(), "auto").on_hover_text("The model's default effort").clicked() {
+                                set_effort = Some("auto".to_string());
+                                ui.close();
+                            }
+                            for e in levels {
+                                if ui.selectable_label(cur.as_deref() == Some(e.as_str()), e).clicked() {
+                                    set_effort = Some(e.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                }
             }
             ui.label(RichText::new(cwd).size(12.0).color(TEXT_FAINT));
             if let Some(code) = exited {
@@ -372,6 +413,10 @@ impl App {
         }
         if compact {
             self.send_command_to(id, "/compact");
+        }
+        if let Some(e) = set_effort {
+            // The session notes it from the typed line (restarts / resumes keep it).
+            self.send_command_to(id, &format!("/effort {e}"));
         }
         if change_model {
             if is_codex {

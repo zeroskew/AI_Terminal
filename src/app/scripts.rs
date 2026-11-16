@@ -12,6 +12,8 @@ pub(super) struct Script {
     pub path: PathBuf,
     /// The first comment line, else the file type.
     pub desc: String,
+    /// It takes its AI model from the app (see `uses_ai`).
+    pub ai: bool,
 }
 
 /// File types the palette lists.
@@ -21,7 +23,7 @@ const SAMPLE_NAME: &str = "Commit and push.ps1";
 const SAMPLE: &str = include_str!("../../assets/scripts/Commit and push.ps1");
 /// Hashes (see `text_hash`) of earlier shipped versions of the sample. A copy that still matches
 /// one wasn't edited, so it's replaced with the current version.
-const OLD_SAMPLES: [u64; 2] = [0xa86de507e36a486b, 0xd48bff3611193aec];
+const OLD_SAMPLES: [u64; 4] = [0xa86de507e36a486b, 0xd48bff3611193aec, 0xde390a1ebd7c16bc, 0x0aad71dea74bf85a];
 
 /// FNV-1a of the text without BOM, with LF line ends and no trailing whitespace.
 fn text_hash(text: &str) -> u64 {
@@ -56,8 +58,9 @@ fn scan() -> Vec<Script> {
                 return None;
             }
             let name = path.file_stem()?.to_string_lossy().into_owned();
-            let desc = first_comment(&std::fs::read_to_string(&path).unwrap_or_default()).unwrap_or_else(|| format!(".{ext} script"));
-            Some(Script { name, path, desc })
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let desc = first_comment(&text).unwrap_or_else(|| format!(".{ext} script"));
+            Some(Script { name, path, desc, ai: uses_ai(&text) })
         })
         .collect();
     v.sort_by_key(|s| s.name.to_lowercase());
@@ -112,7 +115,16 @@ impl App {
             return self.toast(format!("Folder not found: {}", project.display()), RED, ctx);
         }
         let (program, args) = script_command(sc, self.pwsh());
-        self.run_in_background(ctx, sc.name.clone(), program, args, project, None);
+        let env = self.script_model(&sc.path).map(|m| vec![("AI_TERMINAL_CLI".to_string(), m.cli), ("AI_TERMINAL_MODEL".to_string(), m.model), ("AI_TERMINAL_EFFORT".to_string(), m.effort)]).unwrap_or_default();
+        match ScriptRun::start(ctx, sc.name.clone(), program, args, project, None, env) {
+            Ok(r) => self.script_runs.push(r),
+            Err(e) => self.toast(format!("Couldn't run {}: {e}", sc.name), RED, ctx),
+        }
+    }
+
+    /// The model picked for a script in Options > Scripts (None = the script's own default).
+    fn script_model(&self, path: &Path) -> Option<ScriptModel> {
+        self.s.script_models.get(&script_key(path)?).filter(|m| !m.model.is_empty()).cloned()
     }
 
     /// pwsh if it's installed, else Windows PowerShell.
@@ -123,7 +135,7 @@ impl App {
     /// Runs a program hidden, with its output in a panel at the bottom right. `agent`: an
     /// install / uninstall of that agent CLI (the agent list is re-detected when it ends).
     pub(super) fn run_in_background(&mut self, ctx: &egui::Context, name: String, program: String, args: Vec<String>, cwd: PathBuf, agent: Option<Kind>) {
-        match ScriptRun::start(ctx, name.clone(), program, args, cwd, agent) {
+        match ScriptRun::start(ctx, name.clone(), program, args, cwd, agent, Vec::new()) {
             Ok(r) => self.script_runs.push(r),
             Err(e) => self.toast(format!("Couldn't run {name}: {e}"), RED, ctx),
         }
@@ -268,7 +280,7 @@ impl App {
         }
         if let Some(i) = again.and_then(|id| self.script_runs.iter().position(|r| r.id == id)) {
             let r = &self.script_runs[i];
-            match ScriptRun::start(ctx, r.name.clone(), r.program.clone(), r.args.clone(), r.cwd.clone(), r.agent) {
+            match ScriptRun::start(ctx, r.name.clone(), r.program.clone(), r.args.clone(), r.cwd.clone(), r.agent, r.env.clone()) {
                 Ok(n) => self.script_runs[i] = n,
                 Err(e) => {
                     let msg = format!("Couldn't run {}: {e}", r.name);
@@ -289,6 +301,7 @@ impl App {
         let mut close = false;
         let mut edit = false;
         let project = project_name(&self.current_project());
+        let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let m = egui::Modal::new(egui::Id::unique("scripts")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.horizontal(|ui| {
@@ -322,11 +335,16 @@ impl App {
             if self.scripts.is_empty() {
                 ui.label(RichText::new("No scripts yet. Put .ps1, .cmd, .bat or .py files in the scripts folder (Open folder), or ask an agent to write one (Edit scripts… > Copy prompt).").color(TEXT_FAINT));
             }
-            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            super::snippets::palette_scroll(ui, shown.len()).show(ui, |ui| {
                 for i in shown {
                     let sc = &self.scripts[i];
-                    let ext = sc.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                    if super::snippets::palette_row(ui, &sc.name, &sc.desc, &ext).clicked() {
+                    // The AI model it will use, else the file type.
+                    let note = if sc.ai { model_note(&catalog, self.script_model(&sc.path).as_ref()) } else { sc.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase() };
+                    let mut row = super::snippets::palette_row(ui, &sc.name, &sc.desc, &note);
+                    if sc.ai {
+                        row = row.on_hover_text("Uses this AI model. Change it in Edit scripts…");
+                    }
+                    if row.clicked() {
                         pick = Some(i);
                     }
                 }
@@ -362,6 +380,17 @@ fn script_command(sc: &Script, pwsh: String) -> (String, Vec<String>) {
     }
 }
 
+/// The settings key for a script's model: its lowercase file name.
+fn script_key(path: &Path) -> Option<String> {
+    Some(path.file_name()?.to_string_lossy().to_lowercase())
+}
+
+/// Whether a script takes its AI model from the app (reads AI_TERMINAL_MODEL): only those get a
+/// model picker, since a script that names its own model would ignore it.
+fn uses_ai(text: &str) -> bool {
+    text.to_lowercase().contains("ai_terminal_model")
+}
+
 /// A script or command running in the background (no console window), stdout and stderr captured.
 pub(super) struct ScriptRun {
     id: u64,
@@ -371,6 +400,8 @@ pub(super) struct ScriptRun {
     cwd: PathBuf,
     /// An install / uninstall of this agent CLI.
     agent: Option<Kind>,
+    /// Extra environment variables (the script's AI model).
+    env: Vec<(String, String)>,
     child: std::process::Child,
     stdin: Option<std::process::ChildStdin>,
     /// Raw output from both pipes, appended by reader threads.
@@ -392,7 +423,7 @@ const MAX_OUT: usize = 512 * 1024;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 impl ScriptRun {
-    fn start(ctx: &egui::Context, name: String, program: String, args: Vec<String>, cwd: PathBuf, agent: Option<Kind>) -> std::io::Result<Self> {
+    fn start(ctx: &egui::Context, name: String, program: String, args: Vec<String>, cwd: PathBuf, agent: Option<Kind>, env: Vec<(String, String)>) -> std::io::Result<Self> {
         use std::io::Read;
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
@@ -403,6 +434,7 @@ impl ScriptRun {
             .env("PYTHONIOENCODING", "utf-8")
             .env("NO_COLOR", "1")
             .env("AI_TERMINAL_SCRIPT", "1")
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -436,6 +468,7 @@ impl ScriptRun {
             args,
             cwd,
             agent,
+            env,
             stdin: child.stdin.take(),
             child,
             out,
@@ -518,6 +551,8 @@ pub(super) struct ScriptDraft {
     saved_text: String,
     confirm_delete: bool,
     error: Option<String>,
+    /// The source box is shown (collapsed by default so a long list stays short).
+    expanded: bool,
 }
 
 impl ScriptDraft {
@@ -528,7 +563,7 @@ impl ScriptDraft {
     fn from_file(s: &Script) -> Self {
         let text = std::fs::read_to_string(&s.path).unwrap_or_default().trim_start_matches('\u{feff}').replace("\r\n", "\n");
         let ext = s.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        ScriptDraft { path: Some(s.path.clone()), name: s.name.clone(), ext, saved_name: s.name.clone(), saved_text: text.clone(), text, confirm_delete: false, error: None }
+        ScriptDraft { path: Some(s.path.clone()), name: s.name.clone(), ext, saved_name: s.name.clone(), saved_text: text.clone(), text, confirm_delete: false, error: None, expanded: false }
     }
 
     /// Writes the file, renaming it first when the name changed. Batch files get CRLF.
@@ -566,13 +601,133 @@ impl ScriptDraft {
     }
 }
 
+/// The CLIs a script's model can come from: settings value, menu name.
+const SCRIPT_CLIS: [(&str, &str); 3] = [("claude", "Claude"), ("codex", "Codex"), ("antigravity", "Antigravity")];
+
+fn cli_name(cli: &str) -> &'static str {
+    SCRIPT_CLIS.iter().find(|c| c.0 == cli).map_or("Claude", |c| c.1)
+}
+
+fn cli_models<'a>(catalog: &'a agents::Catalog, cli: &str) -> &'a [agents::ModelInfo] {
+    match cli {
+        "codex" => &catalog.codex_models,
+        "antigravity" => &catalog.agy_models,
+        _ => &catalog.claude_models,
+    }
+}
+
+/// The palette's note for a script that takes its model from the app.
+fn model_note(catalog: &agents::Catalog, m: Option<&ScriptModel>) -> String {
+    match m {
+        None => "script's default model".into(),
+        Some(m) => {
+            let label = cli_models(catalog, &m.cli).iter().find(|x| x.id == m.model).map_or(m.model.as_str(), |x| x.label.as_str());
+            let effort = if m.effort.is_empty() { String::new() } else { format!(" · {}", m.effort) };
+            format!("{} · {label}{effort}", cli_name(&m.cli))
+        }
+    }
+}
+
+/// The agent kind behind a script CLI value.
+fn cli_kind(cli: &str) -> Kind {
+    match cli {
+        "codex" => Kind::Codex,
+        "antigravity" => Kind::Antigravity,
+        _ => Kind::Claude,
+    }
+}
+
+/// The effort levels a script's model offers (none for Antigravity).
+fn cli_efforts(catalog: &agents::Catalog, m: &ScriptModel) -> Vec<String> {
+    catalog.efforts(cli_kind(&m.cli), Some(&m.model))
+}
+
+/// The effort dropdown next to a script's model (only for a CLI with effort levels).
+fn effort_picker(ui: &mut Ui, i: usize, catalog: &agents::Catalog, models: &mut std::collections::HashMap<String, ScriptModel>, key: &str) {
+    let Some(m) = models.get_mut(key) else { return };
+    let levels = cli_efforts(catalog, m);
+    if levels.is_empty() {
+        return;
+    }
+    let default = match catalog.default_effort(cli_kind(&m.cli), Some(&m.model)) {
+        Some(d) => format!("default ({d})"),
+        None => "default".to_string(),
+    };
+    let shown = if m.effort.is_empty() { format!("Effort: {default}") } else { format!("Effort: {}", m.effort) };
+    egui::ComboBox::from_id_salt(("script_effort", i)).selected_text(shown).width(130.0).show_ui(ui, |ui| {
+        ui.selectable_value(&mut m.effort, String::new(), default).on_hover_text("The model's default effort");
+        for e in &levels {
+            ui.selectable_value(&mut m.effort, e.clone(), e);
+        }
+    });
+}
+
+/// The AI model dropdown on a script's card: the script's own default, a model from one of the
+/// CLIs' lists, or a typed model id.
+fn model_picker(ui: &mut Ui, i: usize, catalog: &agents::Catalog, models: &mut std::collections::HashMap<String, ScriptModel>, key: &str) {
+    let cur = models.get(key).cloned();
+    let list = |cli: &str| cli_models(catalog, cli);
+    let known = cur.as_ref().and_then(|m| list(&m.cli).iter().find(|x| x.id == m.model));
+    let shown = match (&cur, known) {
+        (None, _) => "AI: script default".to_string(),
+        (Some(m), Some(x)) => format!("{}: {}", cli_name(&m.cli), x.label),
+        (Some(m), None) => format!("{}: other", cli_name(&m.cli)),
+    };
+    let mut pick: Option<Option<ScriptModel>> = None;
+    let tall = ui.ctx().content_rect().height() * 0.7;
+    egui::ComboBox::from_id_salt(("script_model", i)).selected_text(shown).width(240.0).height(tall).show_ui(ui, |ui| {
+        if ui.selectable_label(cur.is_none(), "Script default").on_hover_text("Whatever model the script itself names").clicked() {
+            pick = Some(None);
+        }
+        for (cli, name) in SCRIPT_CLIS {
+            ui.separator();
+            ui.label(RichText::new(name).size(11.5).color(TEXT_FAINT));
+            if list(cli).is_empty() {
+                ui.label(RichText::new("No model list (is it installed?)").size(11.5).color(TEXT_FAINT));
+            }
+            for x in list(cli) {
+                let on = cur.as_ref().is_some_and(|m| m.cli == cli && m.model == x.id);
+                if ui.selectable_label(on, &x.label).on_hover_text(&x.id).clicked() {
+                    pick = Some(Some(ScriptModel { cli: cli.into(), model: x.id.clone(), effort: String::new() }));
+                }
+            }
+            let other = cur.as_ref().is_some_and(|m| m.cli == cli) && known.is_none();
+            if ui.selectable_label(other, "Other model id…").clicked() {
+                pick = Some(Some(ScriptModel { cli: cli.into(), model: String::new(), effort: String::new() }));
+            }
+        }
+    });
+    match pick {
+        Some(None) => {
+            models.remove(key);
+        }
+        Some(Some(mut m)) => {
+            // Keep the effort across model changes when the new model offers it.
+            if let Some(old) = models.get(key).filter(|o| o.cli == m.cli) {
+                m.effort = old.effort.clone();
+            }
+            if !m.effort.is_empty() && !cli_efforts(catalog, &m).contains(&m.effort) {
+                m.effort.clear();
+            }
+            models.insert(key.to_string(), m);
+        }
+        None => {}
+    }
+    // A typed model id (not in the lists), e.g. claude-haiku-5-5.
+    if let Some(m) = models.get_mut(key).filter(|m| !list(&m.cli).iter().any(|x| x.id == m.model)) {
+        let hint = if m.cli == "claude" { "e.g. claude-haiku-5-5" } else { "model id" };
+        ui.add(egui::TextEdit::singleline(&mut m.model).hint_text(hint).desired_width(170.0));
+    }
+    effort_picker(ui, i, catalog, models, key);
+}
+
 /// A starter request for an agent to write a script (Options > Scripts > Copy prompt).
 fn agent_prompt(dir: &Path) -> String {
     format!(
         "Write a script for AI Terminal's Scripts palette and save it in {} (a .ps1 file unless I ask otherwise; .cmd, .bat and .py also work). \
 The file name, without the extension, is the name shown in the palette. Start the file with a one-line comment describing what it does: it's shown as the description. \
 It runs hidden in the current project's folder, with its output shown in a small panel that also has a text box for answers, so it can ask questions. Read-Host doesn't show its prompt there: Write-Host the question first, and treat no answer ($null, end of input) as cancel. For git commands, set $env:GIT_PAGER = 'cat'. \
-If it needs an LLM, call `claude -p --model haiku --tools '\"\"' --strict-mcp-config --no-session-persistence --system-prompt \"...\"` with only the input it needs, to keep it cheap. \
+If it needs an LLM, call `claude -p --model haiku --tools '\"\"' --strict-mcp-config --no-session-persistence --system-prompt \"...\"` with only the input it needs, to keep it cheap. The model can be picked per script in the app: when set, it's in $env:AI_TERMINAL_CLI ('claude', 'codex' or 'antigravity') and $env:AI_TERMINAL_MODEL; use them when present. For codex: `codex exec -m <model> --skip-git-repo-check --sandbox read-only --output-last-message <file> -` with the prompt on stdin, then read the file. For antigravity: `agy --model <model> --disable-slash-commands --input-format stream-json --output-format stream-json -p \"\"` with one line on stdin, `{{\"event\":\"user\",\"message\":{{\"content\":\"<prompt>\"}}}}` (build it with ConvertTo-Json -Compress); the answer is in result.response of the output line whose event is \"result\". \
 The script should: ",
         dir.display()
     )
@@ -595,7 +750,10 @@ impl App {
         for f in scan() {
             match old.iter().position(|d| d.path.as_ref() == Some(&f.path) && d.dirty()) {
                 Some(i) => v.push(old.remove(i)),
-                None => v.push(ScriptDraft::from_file(&f)),
+                None => {
+                    let expanded = old.iter().any(|d| d.path.as_ref() == Some(&f.path) && d.expanded);
+                    v.push(ScriptDraft { expanded, ..ScriptDraft::from_file(&f) });
+                }
             }
         }
         v.extend(old.into_iter().filter(|d| d.path.is_none()));
@@ -635,15 +793,22 @@ impl App {
         });
         ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (click it to keep it open)", DISMISS_AFTER.as_secs()));
         ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
+        ui.label(RichText::new("Scripts that read $env:AI_TERMINAL_MODEL (and AI_TERMINAL_CLI) get a model picker: the Claude, Codex or Antigravity model you pick there is passed to them.").size(12.0).color(TEXT_FAINT));
         ui.add_space(8.0);
         let mut remove = None;
         let mut open: Option<PathBuf> = None;
+        let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
+        let models = &mut self.s.script_models;
         for (i, d) in self.script_drafts.iter_mut().enumerate() {
             egui::Frame::new().fill(CARD).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut d.name).hint_text("Name").desired_width(260.0));
                     ui.label(RichText::new(format!(".{}", d.ext)).color(TEXT_FAINT));
+                    let label = if d.expanded { "Hide script" } else { "Show script" };
+                    if ui.button(label).clicked() {
+                        d.expanded = !d.expanded;
+                    }
                     if d.dirty() {
                         widgets::pill(ui, if d.path.is_none() { "new" } else { "unsaved" }, Color32::WHITE, Color32::from_rgb(150, 80, 20));
                     }
@@ -665,14 +830,42 @@ impl App {
                             d.error = None;
                         }
                         if ui.add_enabled(d.dirty(), egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                            let old = d.path.as_deref().and_then(script_key);
                             d.error = d.save().err();
+                            // A rename keeps the script's model.
+                            if let (Some(old), Some(new)) = (old, d.path.as_deref().and_then(script_key)) {
+                                if old != new {
+                                    if let Some(m) = models.remove(&old) {
+                                        models.insert(new, m);
+                                    }
+                                }
+                            }
                             d.confirm_delete = false;
                         }
                     });
                 });
-                egui::ScrollArea::vertical().id_salt(("script_text", i)).max_height(360.0).show(ui, |ui| {
-                    ui.add(egui::TextEdit::multiline(&mut d.text).code_editor().desired_rows(4).desired_width(f32::INFINITY));
-                });
+                // Second line: the AI model (scripts that call one) and, collapsed, the description.
+                let ai_key = d.path.as_deref().and_then(script_key).filter(|_| uses_ai(&d.saved_text));
+                if ai_key.is_some() || !d.expanded {
+                    ui.horizontal(|ui| {
+                        if let Some(key) = &ai_key {
+                            model_picker(ui, i, &catalog, models, key);
+                        }
+                        if !d.expanded {
+                            let desc = first_comment(&d.text).unwrap_or_else(|| format!("{} lines", d.text.lines().count()));
+                            ui.add(egui::Label::new(RichText::new(desc).size(12.5).color(TEXT_DIM)).truncate());
+                        }
+                    });
+                }
+                if d.expanded {
+                    // Fixed height from the line count (up to 360): inside the page's scroll area a
+                    // ScrollArea would otherwise shrink to whatever is left of the visible window.
+                    let row = ui.text_style_height(&egui::TextStyle::Monospace);
+                    let h = ((d.text.lines().count().max(4) + 1) as f32 * row + 8.0).min(360.0);
+                    egui::ScrollArea::vertical().id_salt(("script_text", i)).min_scrolled_height(h).max_height(h).show(ui, |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut d.text).code_editor().desired_rows(4).desired_width(f32::INFINITY));
+                    });
+                }
                 if let Some(e) = &d.error {
                     ui.label(RichText::new(e).color(RED));
                 }
@@ -681,6 +874,9 @@ impl App {
         }
         if let Some(i) = remove {
             let d = self.script_drafts.remove(i);
+            if let Some(key) = d.path.as_deref().and_then(script_key) {
+                self.s.script_models.remove(&key);
+            }
             if let Some(p) = d.path {
                 if let Err(e) = std::fs::remove_file(&p) {
                     self.toast(format!("Couldn't delete {}: {e}", p.display()), RED, ui.ctx());
@@ -697,7 +893,7 @@ impl App {
                 let taken = |n: &str| self.script_drafts.iter().any(|d| d.name.eq_ignore_ascii_case(n));
                 let name = (1..).map(|k| if k == 1 { "New script".to_string() } else { format!("New script {k}") }).find(|n| !taken(n)).unwrap();
                 let ext = self.script_new_ext.clone();
-                self.script_drafts.push(ScriptDraft { path: None, saved_name: String::new(), saved_text: String::new(), text: template(&ext), name, ext, confirm_delete: false, error: None });
+                self.script_drafts.push(ScriptDraft { path: None, saved_name: String::new(), saved_text: String::new(), text: template(&ext), name, ext, confirm_delete: false, error: None, expanded: true });
             }
             egui::ComboBox::from_id_salt("script_new_ext").selected_text(format!(".{}", self.script_new_ext)).width(70.0).show_ui(ui, |ui| {
                 for k in KINDS {
@@ -716,7 +912,7 @@ mod tests {
     fn save_rename_and_conflicts() {
         let dir = std::env::temp_dir().join(format!("ai_terminal_scripts_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let new = |name: &str, ext: &str, text: &str| ScriptDraft { path: None, name: name.into(), ext: ext.into(), text: text.into(), saved_name: String::new(), saved_text: String::new(), confirm_delete: false, error: None };
+        let new = |name: &str, ext: &str, text: &str| ScriptDraft { path: None, name: name.into(), ext: ext.into(), text: text.into(), saved_name: String::new(), saved_text: String::new(), confirm_delete: false, error: None, expanded: false };
         let mut a = new("One", "cmd", "@echo off\necho 1\n");
         a.save_in(&dir).unwrap();
         assert!(!a.dirty());
@@ -755,9 +951,9 @@ if ($null -eq $a) { exit 3 }
 Write-Host \"hi $a\"
 exit 0
 ").unwrap();
-        let sc = super::Script { name: "Ask".into(), path, desc: String::new() };
+        let sc = super::Script { name: "Ask".into(), path, desc: String::new(), ai: false };
         let (program, args) = super::script_command(&sc, "powershell.exe".into());
-        let mut r = super::ScriptRun::start(&egui::Context::default(), sc.name.clone(), program, args, dir.clone(), None).unwrap();
+        let mut r = super::ScriptRun::start(&egui::Context::default(), sc.name.clone(), program, args, dir.clone(), None, Vec::new()).unwrap();
         r.input = "Bob".into();
         r.send_line();
         let t0 = std::time::Instant::now();

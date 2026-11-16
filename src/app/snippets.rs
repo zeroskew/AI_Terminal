@@ -11,16 +11,31 @@ pub(super) fn palette_row(ui: &mut Ui, name: &str, detail: &str, note: &str) -> 
         p.rect_filled(r, 5.0, CARD_HI);
     }
     p.text(egui::pos2(r.left() + 10.0, r.top() + 13.0), egui::Align2::LEFT_CENTER, name, egui::FontId::new(14.0, bold()), TEXT);
+    // The note on the right, laid out first so the detail line stops before it.
+    let note_g = (!note.is_empty()).then(|| ui.fonts_mut(|f| f.layout_no_wrap(note.to_string(), egui::FontId::proportional(11.5), TEXT_FAINT)));
+    let note_w = note_g.as_ref().map_or(0.0, |g| g.size().x);
     let mut job = egui::text::LayoutJob::simple_singleline(detail.to_string(), egui::FontId::monospace(12.0), TEXT_DIM);
-    job.wrap.max_width = r.width() - 110.0;
+    job.wrap.max_width = r.width() - (note_w + 40.0).max(110.0);
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let g = ui.fonts_mut(|f| f.layout_job(job));
     p.galley(egui::pos2(r.left() + 10.0, r.top() + 24.0), g, TEXT_DIM);
-    if !note.is_empty() {
-        p.text(egui::pos2(r.right() - 10.0, r.center().y), egui::Align2::RIGHT_CENTER, note, egui::FontId::proportional(11.5), TEXT_FAINT);
+    if let Some(g) = note_g {
+        let pos = egui::pos2(r.right() - 10.0 - g.size().x, r.center().y - g.size().y / 2.0);
+        p.galley(pos, g, TEXT_FAINT);
     }
     resp
+}
+
+/// A scroll area for `rows` palette rows that is exactly as tall as its rows, up to 70% of the
+/// window. (Sized explicitly: a plain ScrollArea inside a modal keeps last frame's height, so a
+/// list that grows, e.g. after Refresh, gets clipped.)
+pub(super) fn palette_scroll(ui: &Ui, rows: usize) -> egui::ScrollArea {
+    let gap = ui.spacing().item_spacing.y;
+    let content = rows as f32 * (44.0 + gap) - if rows > 0 { gap } else { 0.0 };
+    let cap = (ui.ctx().content_rect().height() * 0.7).max(200.0);
+    let h = content.min(cap);
+    egui::ScrollArea::vertical().min_scrolled_height(h).max_height(h)
 }
 
 impl App {
@@ -77,7 +92,7 @@ impl App {
             if self.s.snippets.is_empty() {
                 ui.label(RichText::new("No snippets yet. Add some in Options > Snippets.").color(TEXT_FAINT));
             }
-            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+            palette_scroll(ui, shown.len()).show(ui, |ui| {
                 for i in shown {
                     let sn = &self.s.snippets[i];
                     if palette_row(ui, &sn.name, sn.text.lines().next().unwrap_or(""), if sn.send { "↵ sends" } else { "" }).clicked() {
