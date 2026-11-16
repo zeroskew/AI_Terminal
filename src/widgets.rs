@@ -30,6 +30,8 @@ pub enum Icon {
     Kimi,
     /// OpenCode: its square-ring logo.
     OpenCode,
+    /// A magnifying glass.
+    Search,
 }
 
 /// Fills a logo given as convex pieces in -1..1 coordinates, scaled by `h` around `c`. A hairline
@@ -73,6 +75,12 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             let body = Rect::from_min_max(Pos2::new(c.x - h * 0.6, c.y - h * 0.2), Pos2::new(c.x + h * 0.6, c.y + h * 0.75));
             p.add(Shape::line(vec![body.left_top(), body.left_bottom(), body.right_bottom(), body.right_top()], st));
             p.rect_filled(Rect::from_min_max(Pos2::new(c.x - h * 0.18, c.y + h * 0.2), Pos2::new(c.x + h * 0.18, c.y + h * 0.75)), 1.0, col);
+        }
+        Icon::Search => {
+            let lc = c + Vec2::new(-h * 0.18, -h * 0.18);
+            p.circle_stroke(lc, h * 0.52, st);
+            let d = h * 0.52 * std::f32::consts::FRAC_1_SQRT_2;
+            p.line_segment([lc + Vec2::splat(d), c + Vec2::splat(h * 0.8)], Stroke::new(2.0, col));
         }
         Icon::Gear => {
             let n = 8;

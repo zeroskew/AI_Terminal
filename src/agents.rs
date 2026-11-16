@@ -51,10 +51,10 @@ pub const AGENTS: [AgentSpec; 6] = [
 ];
 
 impl Kind {
-    /// Claude / Codex: the app finds their conversations (resume, titles, cost, model).
-    /// The other agents run as plain terminal sessions.
+    /// Claude / Codex / Antigravity: the app finds their conversations (resume, titles, search;
+    /// cost and model for Claude / Codex). The other agents run as plain terminal sessions.
     pub fn tracks_conversation(self) -> bool {
-        matches!(self, Kind::Claude | Kind::Codex)
+        matches!(self, Kind::Claude | Kind::Codex | Kind::Antigravity)
     }
 
     /// The flag that starts the agent without permission prompts, if it has one.
@@ -303,6 +303,9 @@ pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str
             }
         }
         Kind::Antigravity | Kind::Qwen | Kind::OpenCode | Kind::Kimi => {
+            if let (Kind::Antigravity, Some(id)) = (kind, resume) {
+                a.extend(["--conversation".into(), id.to_string()]);
+            }
             if let Some(f) = kind.unrestricted_flag().filter(|_| opts.unrestricted) {
                 if !params.iter().any(|p| p == f) {
                     a.push(f.into());
@@ -316,7 +319,7 @@ pub fn build_args(kind: Kind, opts: &LaunchOpts, name: &str, resume: Option<&str
                 a.extend(["--model".into(), m.to_string()]);
             }
             // First prompt (handoff): Antigravity / Qwen run it and stay interactive.
-            if let Some(p) = opts.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+            if let Some(p) = opts.initial_prompt.as_deref().filter(|p| !p.trim().is_empty() && resume.is_none()) {
                 match kind {
                     Kind::Antigravity | Kind::Qwen => a.extend(["--prompt-interactive".into(), p.to_string()]),
                     Kind::OpenCode => a.extend(["--prompt".into(), p.to_string()]),
@@ -527,7 +530,7 @@ fn codex_rollouts_since(since: SystemTime) -> Vec<PathBuf> {
 }
 
 /// Days since 1970-01-01 → (year, month, day) (H. Hinnant's civil_from_days).
-fn civil_date(days: i64) -> (i64, i64, i64) {
+pub fn civil_date(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -694,7 +697,7 @@ fn parse_agy_usage(text: &str) -> Vec<AgyQuota> {
 }
 
 /// "2026-11-23T01:54:39Z" → Unix seconds.
-fn parse_utc(s: &str) -> Option<u64> {
+pub fn parse_utc(s: &str) -> Option<u64> {
     let s = s.strip_suffix('Z')?;
     let (date, time) = s.split_once('T')?;
     let d: Vec<i64> = date.split('-').map(|x| x.parse().ok()).collect::<Option<_>>()?;
@@ -805,9 +808,216 @@ pub fn codex_title(id: &str) -> Option<String> {
     None
 }
 
+// ---------------------------------------------------------------------------------------------
+// Antigravity CLI conversations: `~/.gemini/antigravity-cli/conversations/<id>.db`, one SQLite
+// file each. Its `steps` table holds protobuf messages: step type 14 = the user's input (text in
+// payload field 19.2), 15 = the agent's turn (reply text in 20.1, absent for tool calls); a
+// step's metadata starts with a Timestamp (field 1). `trajectory_metadata_blob` field 1.1 is the
+// workspace as a file:// URI. Read without the schema, by field number.
+
+/// A protobuf field value (wire types varint and length-delimited; fixed-size ones are skipped).
+enum Pb<'a> {
+    Int(u64),
+    Bytes(&'a [u8]),
+}
+
+fn pb_varint(b: &[u8], i: &mut usize) -> Option<u64> {
+    let mut v = 0u64;
+    for shift in (0..64).step_by(7) {
+        let x = *b.get(*i)?;
+        *i += 1;
+        v |= ((x & 0x7f) as u64) << shift;
+        if x < 0x80 {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// The fields of a message, in order (stops at the first malformed one).
+fn pb_fields(b: &[u8]) -> Vec<(u64, Pb<'_>)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let Some(key) = pb_varint(b, &mut i) else { break };
+        let (num, wire) = (key >> 3, key & 7);
+        let v = match wire {
+            0 => match pb_varint(b, &mut i) {
+                Some(v) => Pb::Int(v),
+                None => break,
+            },
+            2 => {
+                let Some(n) = pb_varint(b, &mut i).and_then(|n| usize::try_from(n).ok()) else { break };
+                let Some(s) = b.get(i..i.saturating_add(n)) else { break };
+                i += n;
+                Pb::Bytes(s)
+            }
+            1 => {
+                i += 8;
+                continue;
+            }
+            5 => {
+                i += 4;
+                continue;
+            }
+            _ => break,
+        };
+        out.push((num, v));
+    }
+    out
+}
+
+/// The first length-delimited field along `path` (field numbers, descending into each).
+fn pb_get<'a>(b: &'a [u8], path: &[u64]) -> Option<&'a [u8]> {
+    let (first, rest) = path.split_first()?;
+    let v = pb_fields(b).into_iter().find_map(|(n, v)| match v {
+        Pb::Bytes(s) if n == *first => Some(s),
+        _ => None,
+    })?;
+    if rest.is_empty() {
+        Some(v)
+    } else {
+        pb_get(v, rest)
+    }
+}
+
+fn pb_int(b: &[u8], num: u64) -> Option<u64> {
+    pb_fields(b).into_iter().find_map(|(n, v)| match v {
+        Pb::Int(x) if n == num => Some(x),
+        _ => None,
+    })
+}
+
+fn agy_conversations() -> Option<PathBuf> {
+    Some(home()?.join(".gemini").join("antigravity-cli").join("conversations"))
+}
+
+/// An Antigravity conversation's database file.
+pub fn agy_db(id: &str) -> Option<PathBuf> {
+    let p = agy_conversations()?.join(format!("{id}.db"));
+    p.is_file().then_some(p)
+}
+
+fn agy_open(p: &Path) -> Option<rusqlite::Connection> {
+    use rusqlite::OpenFlags;
+    let c = rusqlite::Connection::open_with_flags(p, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
+    let _ = c.busy_timeout(std::time::Duration::from_millis(500));
+    Some(c)
+}
+
+/// "file:///x%3A/Some/Dir" → "x:\some\dir" (to compare with a project folder).
+fn file_uri_path(u: &str) -> String {
+    let s = u.strip_prefix("file:///").unwrap_or(u);
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            if let Some(x) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(x);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'/' { b'\\' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_lowercase().trim_end_matches('\\').to_string()
+}
+
+/// The workspace folder an Antigravity conversation was started in.
+fn agy_workspace(c: &rusqlite::Connection) -> Option<String> {
+    let data: Vec<u8> = c.query_row("SELECT data FROM trajectory_metadata_blob LIMIT 1", [], |r| r.get(0)).ok()?;
+    Some(file_uri_path(std::str::from_utf8(pb_get(&data, &[1, 1])?).ok()?))
+}
+
+/// The Antigravity conversation started in `cwd` since `since` (the oldest unclaimed one).
+pub fn find_agy_id(cwd: &Path, since: SystemTime, claimed: &std::collections::HashSet<String>) -> Option<String> {
+    let since = since - std::time::Duration::from_secs(2);
+    let want = cwd.display().to_string().to_lowercase().trim_end_matches('\\').to_string();
+    let mut best: Option<(SystemTime, String)> = None;
+    for e in std::fs::read_dir(agy_conversations()?).ok()?.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("db") {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|x| x.to_str()).map(str::to_string) else { continue };
+        let Ok(m) = e.metadata() else { continue };
+        let created = m.created().or_else(|_| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        if claimed.contains(&stem) || created < since || best.as_ref().is_some_and(|(t, _)| created >= *t) {
+            continue;
+        }
+        if agy_open(&p).and_then(|c| agy_workspace(&c)).as_deref() == Some(want.as_str()) {
+            best = Some((created, stem));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// One message of an Antigravity conversation.
+pub struct AgyMessage {
+    pub user: bool,
+    /// Unix seconds.
+    pub time: Option<u64>,
+    pub text: String,
+}
+
+/// The user's and the agent's messages, in order (tool calls left out).
+pub fn agy_messages(id: &str) -> Vec<AgyMessage> {
+    let Some(c) = agy_db(id).and_then(|p| agy_open(&p)) else { return Vec::new() };
+    let Ok(mut q) = c.prepare("SELECT step_type, metadata, step_payload FROM steps WHERE step_type IN (14, 15) ORDER BY idx") else { return Vec::new() };
+    let rows = q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Vec<u8>>>(1)?, r.get::<_, Option<Vec<u8>>>(2)?)));
+    let Ok(rows) = rows else { return Vec::new() };
+    rows.flatten()
+        .filter_map(|(kind, meta, payload)| {
+            let user = kind == 14;
+            let text = pb_get(payload.as_deref()?, if user { &[19, 2] } else { &[20, 1] })?;
+            let text = std::str::from_utf8(text).ok()?.to_string();
+            let time = meta.as_deref().and_then(|m| pb_get(m, &[1])).and_then(|t| pb_int(t, 1));
+            (!text.trim().is_empty()).then_some(AgyMessage { user, time, text })
+        })
+        .collect()
+}
+
+/// An Antigravity session's name: its first prompt.
+pub fn agy_title(id: &str) -> Option<String> {
+    agy_messages(id).into_iter().filter(|m| m.user).find_map(|m| tidy_prompt(&m.text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_resumes_by_conversation() {
+        let o = LaunchOpts { initial_prompt: Some("hi".into()), ..Default::default() };
+        assert_eq!(build_args(Kind::Antigravity, &o, "", Some("abc"), "k"), vec!["--conversation", "abc"]);
+    }
+
+    #[test]
+    fn protobuf_paths_and_uris() {
+        // Field 19 { field 2: "hi" }, then field 1 = varint 150.
+        let msg = [0x9a, 0x01, 0x04, 0x12, 0x02, b'h', b'i', 0x08, 0x96, 0x01];
+        assert_eq!(pb_get(&msg, &[19, 2]), Some(&b"hi"[..]));
+        assert_eq!(pb_int(&msg, 1), Some(150));
+        assert!(pb_get(&msg, &[20, 1]).is_none());
+        assert_eq!(file_uri_path("file:///x%3A/GameArtists/Other/AI_Terminal/"), "x:\\gameartists\\other\\ai_terminal");
+    }
+
+    /// Reads the real Antigravity store (run by hand: `build.cmd test -- --ignored agy`).
+    #[test]
+    #[ignore]
+    fn agy_live_messages() {
+        for e in std::fs::read_dir(agy_conversations().unwrap()).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "db")) {
+            let id = e.path().file_stem().unwrap().to_string_lossy().to_string();
+            let ws = agy_open(&e.path()).and_then(|c| agy_workspace(&c));
+            let msgs = agy_messages(&id);
+            println!("{id} {ws:?} {} messages, title {:?}", msgs.len(), agy_title(&id));
+            for m in msgs.iter().take(4) {
+                println!("  {} {:?} {}", if m.user { "user " } else { "agent" }, m.time, m.text.chars().take(80).collect::<String>());
+            }
+        }
+    }
 
     #[test]
     fn naming_prompt_only_for_new_unnamed_sessions() {

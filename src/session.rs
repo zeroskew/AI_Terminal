@@ -337,7 +337,7 @@ impl Session {
         self.last_title_scan = None;
     }
 
-    /// Links a new Claude / Codex session to its conversation (the agent writes the transcript
+    /// Links a new Claude / Codex / Antigravity session to its conversation (the agent writes the transcript
     /// with the first message, so this is polled every 2 s), and refreshes the session's name
     /// from the transcript every 5 s.
     pub fn poll_agent(&mut self, claimed: &std::collections::HashSet<String>) {
@@ -349,6 +349,7 @@ impl Session {
             self.agent_id = match self.profile.kind {
                 Kind::Claude => crate::agents::find_claude_id(&self.cwd, self.spawned_at, claimed),
                 Kind::Codex => crate::agents::find_codex_id(&self.cwd, self.spawned_at, claimed),
+                Kind::Antigravity => crate::agents::find_agy_id(&self.cwd, self.spawned_at, claimed),
                 _ => None,
             };
         }
@@ -357,14 +358,18 @@ impl Session {
                 self.last_title_scan = Some(std::time::Instant::now());
                 let t = match self.profile.kind {
                     Kind::Claude => crate::agents::claude_title(&self.cwd, &id),
-                    _ => crate::agents::codex_title(&id),
+                    Kind::Codex => crate::agents::codex_title(&id),
+                    Kind::Antigravity => crate::agents::agy_title(&id),
+                    _ => None,
                 };
                 if t.is_some() {
                     self.transcript_title = t;
                 }
                 let c = match self.profile.kind {
                     Kind::Claude => self.cost_tracker.update_claude(&self.cwd, &id),
-                    _ => self.cost_tracker.update_codex(&id),
+                    Kind::Codex => self.cost_tracker.update_codex(&id),
+                    // Antigravity: cost isn't read from its conversations.
+                    _ => Default::default(),
                 };
                 if c.usage.total() > 0 {
                     self.cost = Some(c);

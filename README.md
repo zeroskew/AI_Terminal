@@ -90,6 +90,7 @@ images inside the terminal**.
 | Ctrl+= / Ctrl+- / Ctrl+0, Ctrl+wheel | Terminal font size |
 | Shift+PgUp / PgDn / Home / End, wheel | Scrollback |
 | Ctrl+Shift+I | Inline image previews on / off |
+| Ctrl+Alt+F | Search session messages (current session or all sessions) |
 | Double / triple click | Select word / line |
 
 Pasted images are trimmed from the paste folder at start-up and after each pasted image: files older than **Settings → Images → Keep images for** (default 30 days) are deleted, then the oldest files until the folder fits **Folder size limit** (default 1 GB). 0 means unlimited for either.
@@ -148,6 +149,12 @@ after saving.
 
 - **Find** (Ctrl+Shift+F): searches the whole scrollback (case-insensitive, Aa for exact case),
   highlights matches, "n of m", Enter / Shift+Enter or ↑ ↓ to step, Esc to close.
+- **Search sessions** (Ctrl+Alt+F, or the magnifier in the top bar): searches the messages (yours
+  and the agent's, not tool output) in Claude / Codex / Antigravity conversations. **All sessions**
+  covers every listed session in every project, archived ones included; off, only the current
+  session. **Days back** limits it to recent messages (0 = everything there is). Results are
+  grouped by session, newest first; **Open** (or clicking a match) switches to the session,
+  resuming it if it isn't running, and opens its find bar with the query.
 - **Links**: hold Ctrl over a URL or a file path (`src\app.rs:123:7`, absolute or relative to the
   session folder) and click: URLs open in the browser, files in your editor (Options > General >
   Links: VS Code, Rider, default app or a custom command with {file} {line} {col}).

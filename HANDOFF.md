@@ -38,6 +38,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
   - `--debug-log` (log goes to `%LOCALAPPDATA%\AI_Terminal\logs\ai_terminal.log`)
   - `--no-previews`, `--pin <n>`
   - `--home` (opens on the Home page)
+  - `--search <text>` (opens the Search window and runs it)
 - Real Claude end-to-end runs (`--start Claude --type "..."`) work; Claude opens in the selected
   project; pass `--add-project` with an already-trusted folder, or Claude stops at its trust prompt.
 
@@ -50,7 +51,7 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 | `app/*.rs` | `impl App` blocks by area: `topbar`, `sidebar`, `pages` (home / empty project), `launch`, `options`, `snippets`, `scripts` (palette for `<exe dir>\scripts`, sample from `assets/scripts/`), `plugins_ui`, `mcp_servers_ui`, `status_bar` (usage limits; compact / context / clear (confirmation dialog) / MCP servers links), `viewer` (+ toasts), `mcp_api` (ai-terminal MCP tool handlers) |
 | `view.rs` | Terminal widget: grid snapshot under the alacritty lock, painting, box-drawing as shapes, keys→bytes, mouse/selection, image refs + inline previews, colour tags, Ctrl+links, find bar |
 | `session.rs` | One PTY session: alacritty_terminal `Term` + ConPTY event loop, `Profile` detection, launch args, agent id / transcript title / cost polling, activity times |
-| `agents.rs` | Claude/Codex launch flags (`build_args`), model catalogues (`claude --help`, `codex debug models`), transcript lookup (`~/.claude/projects/<mangled cwd>`, `~/.codex/sessions`), titles; statics for hook settings / MCP config / colour-tag prompt |
+| `agents.rs` | Claude/Codex launch flags (`build_args`), model catalogues (`claude --help`, `codex debug models`), transcript lookup (`~/.claude/projects/<mangled cwd>`, `~/.codex/sessions`, Antigravity CLI `~/.gemini/antigravity-cli/conversations/<id>.db`: SQLite, protobuf steps read by field number: type 14 user text 19.2, type 15 agent text 20.1, metadata 1 = timestamp, trajectory_metadata_blob 1.1 = workspace URI), titles; statics for hook settings / MCP config / colour-tag prompt |
 | `hooks.rs` | Claude hooks: `--settings hooks-<hash>.json` runs `ai_terminal.exe --hook <event>`, which writes `%LOCALAPPDATA%\AI_Terminal\events\<key>~<event>~<ns>.evt`; app polls; watcher thread wakes the UI. `SessionStart` → `start` event carrying `session_id` re-links the tab to the new conversation after `/clear` (`Session::set_conversation`). Also sets `statusLine` → `ai_terminal.exe --statusline`, which saves Claude's `rate_limits` to `%LOCALAPPDATA%\AI_Terminal\limits.json` (status bar) and chains the user's own statusLine |
 | `mcp.rs` / `mcp_tools.rs` | Local MCP server (`ai-terminal`, HTTP 127.0.0.1:random, bearer token, header `x-ai-terminal-session`), 12 tools, run on the UI thread via a channel |
 | `images.rs` | Clipboard image → `%TEMP%\AI_Terminal\paste\paste-<hash>.png`; texture cache (mipmaps + exact-size Lanczos copies); image-ref regex |
@@ -59,7 +60,8 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 | `cost.rs` | Cost/tokens from transcripts (Claude: dedupe by message id, subagents included; Codex: token_count), `assets/pricing.json` (user override `%APPDATA%\AI Terminal\pricing.json`) |
 | `plugins.rs` | Claude Code plugin catalogue (marketplace.json files + built-in directory cache), installed list, background `claude plugin …` jobs |
 | `mcp_servers.rs` | Per-project MCP on/off: `claude mcp list` (parsed) + `~/.claude.json` `projects[<path>].disabledMcpServers` (what `/mcp` writes); built-in `claude-artifacts` (not in `mcp list`) via a `permissions.deny: ["Artifact"]` rule in `<project>/.claude/settings.local.json` (Claude Code 2.1.325 skips the server when the Artifact tool is denied; env `CLAUDE_CODE_ARTIFACT=0` also works); `describe()` = per-server help text |
-| `keys.rs` | Reassignable shortcuts (18 commands, stored as text overrides) |
+| `search.rs` / `app/search_ui.rs` | Transcript search (user + agent text parts of Claude / Codex messages; raw-line prefilter, then JSON parse) on a thread; non-modal Search window (all sessions / current, days back), jump = select or resume + terminal find bar |
+| `keys.rs` | Reassignable shortcuts (19 commands, stored as text overrides) |
 | `links.rs` | URL / file:line detection, open in browser / editor |
 | `winsys.rs` | Tray icon + toast (Shell_NotifyIcon), Run-key autostart, taskbar overlay badge, memory reading, sound |
 | `fonts.rs` | CSS-style font list resolved against installed fonts by family name (default list in `fonts::DEFAULT_LIST`) |
@@ -75,8 +77,9 @@ build.cmd run --example mkicon   regenerate the icon (tools\mkicon.rs → assets
 
 ## Session behaviour
 
-- Nothing starts at launch. Saved Claude/Codex sessions are listed and resume on click
-  (`claude --resume <id>`, `codex resume <id>`); shells aren't kept.
+- Nothing starts at launch. Saved Claude/Codex/Antigravity sessions are listed and resume on click
+  (`claude --resume <id>`, `codex resume <id>`, `agy --conversation <id>`); shells aren't kept.
+  Antigravity cost / model aren't read from its conversations (not implemented).
 - **New Claude session:** `--permission-mode auto`.
   - **Unrestricted:** `--dangerously-skip-permissions`.
   - **With settings:** model, effort, CLI params with history, 1M context.

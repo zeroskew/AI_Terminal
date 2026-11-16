@@ -32,7 +32,7 @@ impl App {
 
             // Project tabs, placed by hand on the full bar height (so they line up with Home);
             // the ones that don't fit go into a "»" menu.
-            let right_w = 170.0;
+            let right_w = 210.0;
             let x_end = bar.right() - right_w;
             let mut x = r.right() + 4.0;
             let mut overflow: Vec<Project> = Vec::new();
@@ -185,6 +185,7 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
                 let (main, arrow) = widgets::split_button(ui, None, "Add Project", ACCENT, 28.0);
+                let search_tip = format!("Search session messages{}", keys::binding(&self.s.keybindings, keys::Cmd::SearchSessions).map(|b| format!(" ({})", keys::to_text(&b))).unwrap_or_default());
                 if main.on_hover_text("Add a project folder").clicked() {
                     self.add_project(&ctx);
                 }
@@ -209,6 +210,10 @@ impl App {
                         }
                     }
                 });
+                ui.add_space(6.0);
+                if widgets::icon_button(ui, Icon::Search, 30.0, TEXT_DIM, &search_tip).clicked() {
+                    self.open_search();
+                }
             });
         });
         if let Some(sel) = select {
