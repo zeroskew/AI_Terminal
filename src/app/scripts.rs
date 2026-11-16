@@ -3,6 +3,7 @@
 //! takes typed answers for scripts that ask questions.
 
 use super::*;
+use std::time::Instant;
 
 /// A runnable file in the scripts folder.
 #[derive(Clone)]
@@ -18,6 +19,15 @@ const KINDS: [&str; 4] = ["ps1", "cmd", "bat", "py"];
 
 const SAMPLE_NAME: &str = "Commit and push.ps1";
 const SAMPLE: &str = include_str!("../../assets/scripts/Commit and push.ps1");
+/// Hashes (see `text_hash`) of earlier shipped versions of the sample. A copy that still matches
+/// one wasn't edited, so it's replaced with the current version.
+const OLD_SAMPLES: [u64; 2] = [0xa86de507e36a486b, 0xd48bff3611193aec];
+
+/// FNV-1a of the text without BOM, with LF line ends and no trailing whitespace.
+fn text_hash(text: &str) -> u64 {
+    let t = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    t.trim_end().bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
 
 /// `<exe folder>\scripts`.
 pub(super) fn scripts_dir() -> PathBuf {
@@ -29,6 +39,10 @@ fn scan() -> Vec<Script> {
     let dir = scripts_dir();
     if !dir.exists() && std::fs::create_dir_all(&dir).is_ok() {
         let _ = std::fs::write(dir.join(SAMPLE_NAME), SAMPLE);
+    }
+    let sample = dir.join(SAMPLE_NAME);
+    if std::fs::read_to_string(&sample).is_ok_and(|t| OLD_SAMPLES.contains(&text_hash(&t))) {
+        let _ = std::fs::write(&sample, SAMPLE);
     }
     let mut v: Vec<Script> = std::fs::read_dir(&dir)
         .into_iter()
@@ -122,18 +136,39 @@ impl App {
 
     /// The panels of running and finished scripts, stacked up from the bottom right.
     pub(super) fn script_runs_ui(&mut self, ctx: &egui::Context) {
-        let mut close = None;
+        // Ids of panels to close, and the run to start again.
+        let mut close: Vec<u64> = Vec::new();
         let mut again = None;
         let mut done_toasts = Vec::new();
         let mut redetect = false;
         let mut y = 34.0;
-        for (i, r) in self.script_runs.iter_mut().enumerate() {
+        let auto_dismiss = self.s.script_auto_dismiss;
+        // Panel size: all panels share it; dragging any panel's top / left edge changes it.
+        let mut size = self.s.script_panel_size;
+        let screen = ctx.content_rect();
+        for r in self.script_runs.iter_mut() {
+            let [w, out_h] = size.unwrap_or([520.0, 260.0]);
+            let (w, out_h) = (w.clamp(320.0, (screen.width() - 24.0).max(320.0)), out_h.clamp(60.0, (screen.height() - 200.0).max(60.0)));
             if let Some(code) = r.poll() {
                 redetect |= r.agent.is_some();
                 done_toasts.push(if code == 0 { (format!("{}: done", r.name), GREEN) } else { (format!("{}: failed (exit code {code})", r.name), RED) });
+                if code == 0 && auto_dismiss {
+                    r.dismiss_from = Some(Instant::now());
+                }
+            }
+            if !auto_dismiss {
+                r.dismiss_from = None;
+            }
+            // Share of the countdown left (1 = just started).
+            let left = r.dismiss_from.map(|t| 1.0 - t.elapsed().as_secs_f32() / DISMISS_AFTER.as_secs_f32());
+            if left.is_some_and(|l| l <= 0.0) {
+                close.push(r.id);
+                continue;
             }
             if r.exit.is_none() {
                 ctx.request_repaint_after(Duration::from_millis(250));
+            } else if left.is_some() {
+                ctx.request_repaint();
             }
             let text = r.text();
             let (status, col) = match r.exit {
@@ -143,8 +178,8 @@ impl App {
             };
             let area = egui::Area::new(egui::Id::unique(("script_run", r.id))).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-12.0, -y)).order(egui::Order::Foreground);
             let resp = area.show(ctx, |ui| {
-                egui::Frame::new().fill(PANEL).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
-                    ui.set_width(520.0);
+                let frame = egui::Frame::new().fill(PANEL).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
+                    ui.set_width(w);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&r.name).family(bold()).color(TEXT));
                         if r.agent.is_none() {
@@ -154,14 +189,14 @@ impl App {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let tip = if r.exit.is_none() { "Stop it and close" } else { "Close" };
                             if widgets::icon_button(ui, Icon::Close, 22.0, TEXT_DIM, tip).clicked() {
-                                close = Some(i);
+                                close.push(r.id);
                             }
                             if r.exit.is_none() {
                                 if ui.button("Stop").clicked() {
                                     r.stop();
                                 }
                             } else if ui.button("Run again").clicked() {
-                                again = Some(i);
+                                again = Some(r.id);
                             }
                             if ui.button(if r.collapsed { "Show output" } else { "Hide output" }).clicked() {
                                 r.collapsed = !r.collapsed;
@@ -170,7 +205,8 @@ impl App {
                     });
                     if !r.collapsed {
                         egui::Frame::new().fill(BG).corner_radius(4).inner_margin(6).show(ui, |ui| {
-                            egui::ScrollArea::vertical().id_salt(("script_out", r.id)).max_height(260.0).stick_to_bottom(true).auto_shrink([false, true]).show(ui, |ui| {
+                            // Once resized, the output keeps that height; by default it fits short output.
+                            egui::ScrollArea::vertical().id_salt(("script_out", r.id)).max_height(out_h).stick_to_bottom(true).auto_shrink([false, size.is_none()]).show(ui, |ui| {
                                 let t = if text.is_empty() { "(no output yet)" } else { text.as_str() };
                                 ui.add(egui::Label::new(RichText::new(t).monospace().size(12.0).color(TEXT_DIM)).wrap().selectable(true));
                             });
@@ -186,25 +222,62 @@ impl App {
                             }
                         });
                     }
+                    if let Some(l) = left {
+                        // Auto-dismiss countdown: a bar that empties to the right.
+                        ui.add_space(4.0);
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+                        ui.painter().rect_filled(rect, 1.5, BORDER);
+                        let mut fill = rect;
+                        fill.set_width(rect.width() * l.clamp(0.0, 1.0));
+                        ui.painter().rect_filled(fill, 1.5, GREEN);
+                    }
                 });
+                // Resize handles: left edge, top edge, top-left corner (added last so it wins).
+                // Double-click one for the default size.
+                let fr = frame.response.rect;
+                let handles = [
+                    ("l", egui::Rect::from_min_max(egui::pos2(fr.left() - 3.0, fr.top() + 10.0), egui::pos2(fr.left() + 4.0, fr.bottom())), egui::CursorIcon::ResizeHorizontal, (true, false)),
+                    ("t", egui::Rect::from_min_max(egui::pos2(fr.left() + 10.0, fr.top() - 3.0), egui::pos2(fr.right(), fr.top() + 4.0)), egui::CursorIcon::ResizeVertical, (false, true)),
+                    ("c", egui::Rect::from_min_size(fr.min - Vec2::splat(3.0), Vec2::splat(13.0)), egui::CursorIcon::ResizeNorthWest, (true, true)),
+                ];
+                for (key, rect, cursor, (dx, dy)) in handles {
+                    let h = ui.interact(rect, egui::Id::unique(("script_resize", r.id, key)), Sense::click_and_drag());
+                    if h.hovered() || h.dragged() {
+                        ui.ctx().set_cursor_icon(cursor);
+                    }
+                    if h.double_clicked() {
+                        size = None;
+                    } else if h.dragged() {
+                        let d = h.drag_delta();
+                        size = Some([w - if dx { d.x } else { 0.0 }, out_h - if dy { d.y } else { 0.0 }]);
+                    }
+                }
             });
+            // Hovering holds it open: the countdown restarts.
+            if r.dismiss_from.is_some() && resp.response.contains_pointer() {
+                r.dismiss_from = Some(Instant::now());
+            }
             y += resp.response.rect.height() + 8.0;
         }
+        self.s.script_panel_size = size;
         for (m, c) in done_toasts {
             self.toast(m, c, ctx);
         }
         if redetect {
             self.redetect_agents(ctx);
         }
-        if let Some(i) = again {
-            let r = self.script_runs.remove(i);
+        if let Some(i) = again.and_then(|id| self.script_runs.iter().position(|r| r.id == id)) {
+            let r = &self.script_runs[i];
             match ScriptRun::start(ctx, r.name.clone(), r.program.clone(), r.args.clone(), r.cwd.clone(), r.agent) {
-                Ok(n) => self.script_runs.insert(i, n),
-                Err(e) => self.toast(format!("Couldn't run {}: {e}", r.name), RED, ctx),
+                Ok(n) => self.script_runs[i] = n,
+                Err(e) => {
+                    let msg = format!("Couldn't run {}: {e}", r.name);
+                    self.toast(msg, RED, ctx);
+                }
             }
-        } else if let Some(i) = close {
-            self.script_runs.remove(i); // Drop stops it if it's still running.
         }
+        // Drop stops a run that's still going.
+        self.script_runs.retain(|r| !close.contains(&r.id));
     }
 
     /// The scripts palette (Ctrl+Shift+R or the header button): filter, Enter = first match.
@@ -307,7 +380,12 @@ pub(super) struct ScriptRun {
     exit: Option<i32>,
     input: String,
     collapsed: bool,
+    /// When the auto-dismiss countdown started (it finished successfully; restarts on hover).
+    dismiss_from: Option<Instant>,
 }
+
+/// How long a finished panel stays before it closes itself.
+const DISMISS_AFTER: Duration = Duration::from_secs(5);
 
 /// Output kept per run (older output is dropped).
 const MAX_OUT: usize = 512 * 1024;
@@ -365,6 +443,7 @@ impl ScriptRun {
             exit: None,
             input: String::new(),
             collapsed: false,
+            dismiss_from: None,
         })
     }
 
@@ -554,6 +633,8 @@ impl App {
                 self.sync_script_drafts();
             }
         });
+        ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (hover it to keep it open)", DISMISS_AFTER.as_secs()));
+        ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
         ui.add_space(8.0);
         let mut remove = None;
         let mut open: Option<PathBuf> = None;
