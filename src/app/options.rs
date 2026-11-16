@@ -430,7 +430,19 @@ impl App {
         Self::opt_check(ui, &mut self.s.minimize_to_tray, "Minimize to system tray", "When minimizing or closing the window, hide it to the system tray and keep sessions running. Quit from the tray icon's menu.");
 
         Self::opt_heading(ui, "UPDATES");
-        Self::opt_check(ui, &mut self.s.auto_update, "Update automatically", "Check GitHub for a new release at start-up and every few hours, download it in the background, and install it when AI Terminal restarts.");
+        Self::opt_check(ui, &mut self.s.auto_update, "Update automatically", "Check GitHub for a new release, download it in the background, and install it when AI Terminal restarts.");
+        ui.add_enabled_ui(self.s.auto_update, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                ui.checkbox(&mut self.s.update_on_startup, "Check at start-up");
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                ui.checkbox(&mut self.s.update_periodic, "Check every");
+                ui.add_enabled(self.s.update_periodic, egui::DragValue::new(&mut self.s.update_interval_min).range(1..=43_200).speed(1).suffix(" min")).on_hover_text("Counted from start-up, then from the last automatic check. Default 480 (8 hours); at least 1.");
+            });
+        });
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(28.0);
             if ui.button("Check for updates…").clicked() {

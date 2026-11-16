@@ -288,6 +288,11 @@ pub struct Settings {
     pub search_days: u32,
     /// Check GitHub for a new release now and then, download it, and install it at the next restart.
     pub auto_update: bool,
+    /// When automatic checks run: shortly after start-up, and/or every `update_interval_min`
+    /// minutes (at least 1).
+    pub update_on_startup: bool,
+    pub update_periodic: bool,
+    pub update_interval_min: u32,
     /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
     /// files, so it reads as 0 there (not the struct default).
     #[serde(default)]
@@ -353,6 +358,9 @@ impl Default for Settings {
             search_all: true,
             search_days: 0,
             auto_update: true,
+            update_on_startup: true,
+            update_periodic: true,
+            update_interval_min: 480,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
                 Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
