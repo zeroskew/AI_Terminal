@@ -28,7 +28,7 @@ installs it over the exe you started (Options > General > Updates).
   a dot shows sessions, orange when one has new output), "Add Project" on the right.
   The left panel shows the selected project: the **New Claude session ▼** split button, the
   SESSIONS list (Today / Yesterday / This week…), a filter box and the Options gear. Home shows
-  a card for every project, with **Show in tabs** and **Remove**. Closing a tab (its ×,
+  a card for every project, with **Show in tabs**, **Rename** and **Remove**. Closing a tab (its ×,
   middle-click, or right-click > Close tab) only unticks Show in tabs: the project stays on Home
   and its sessions keep running; opening it from Home brings the tab back. **Remove** (asks
   first) drops the project from the app only; the folder and its files are never deleted.
