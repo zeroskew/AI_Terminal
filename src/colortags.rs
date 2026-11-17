@@ -197,9 +197,40 @@ pub fn layout(cells: &[char]) -> Option<Layout> {
     Some(Layout { cols, row_bg })
 }
 
+/// Text as it reads on screen: color tags removed line by line. Padding kept in front of table
+/// borders (so columns still line up) and dropped at line ends.
+pub fn strip(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        let (line, cr) = match line.strip_suffix('\r') {
+            Some(l) => (l, "\r"),
+            None => (line, ""),
+        };
+        let cells: Vec<char> = line.chars().collect();
+        match layout(&cells) {
+            Some(lay) => {
+                let s: String = lay.cols.iter().map(|o| match o { Out::Src(i, _) => cells[*i], Out::Blank => ' ' }).collect();
+                out.push_str(s.trim_end());
+            }
+            None => out.push_str(line),
+        }
+        out.push_str(cr);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_removes_tags_keeps_alignment() {
+        assert_eq!(strip("- {green}Last used{/}: the {blue}used{/} time\nplain {x}\r\nb"), "- Last used: the used time\nplain {x}\r\nb");
+        assert_eq!(strip("│ {green}OK{/}     │ next"), "│ OK               │ next");
+    }
 
     fn render(s: &str) -> (String, Vec<Style>, Option<TagColor>) {
         let cells: Vec<char> = s.chars().collect();

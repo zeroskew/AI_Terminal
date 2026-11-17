@@ -244,6 +244,15 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, color: Color32, tip: &str
     resp.on_hover_text(tip)
 }
 
+/// Size of a window's close button, and its inset from the window's top and right edges.
+pub const CLOSE_SIZE: f32 = 26.0;
+pub const CLOSE_INSET: f32 = 8.0;
+
+/// The [x] in a window's top-right corner (same look and size in every window).
+pub fn close_button(ui: &mut Ui) -> Response {
+    icon_button(ui, Icon::Close, CLOSE_SIZE, TEXT_DIM, "Close (Esc)")
+}
+
 /// Frameless text button: dim text, a soft background only on hover (for secondary toolbar actions).
 pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
     let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);

@@ -280,7 +280,10 @@ pub fn poll(known: &dyn Fn(&str) -> bool) -> Vec<HookEvent> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(events_dir()) else { return out };
     let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "evt")).collect();
-    files.sort();
+    // In the order they happened (`key~event~nanos`: by name, `active` would always come before
+    // `stop`, whatever their order).
+    let nanos = |p: &PathBuf| p.file_stem().and_then(|s| s.to_str()).and_then(|s| s.rsplit('~').next()).and_then(|n| n.parse::<u128>().ok()).unwrap_or(0);
+    files.sort_by_key(nanos);
     for p in files {
         let Some(stem) = p.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
         let mut parts = stem.splitn(3, '~');

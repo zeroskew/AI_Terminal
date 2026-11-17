@@ -359,7 +359,7 @@ impl App {
                 ui.label(RichText::new("SCRIPTS").size(12.0).family(bold()).color(TEXT_DIM));
                 ui.label(RichText::new(format!("runs in the background in {project}")).size(12.0).color(TEXT_FAINT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 24.0, TEXT_DIM, "Close (Esc)").clicked() {
+                    if widgets::close_button(ui).clicked() {
                         close = true;
                     }
                     if ui.button("Open folder").on_hover_text(scripts_dir().display().to_string()).clicked() {

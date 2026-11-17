@@ -47,7 +47,7 @@ impl App {
                     ui.label(RichText::new(format!("{} / {total}  (← →)", i + 1)).color(TEXT_FAINT).size(12.5));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 24.0, TEXT_DIM, "Close (Esc)").clicked() {
+                    if widgets::close_button(ui).clicked() {
                         close = true;
                     }
                 });

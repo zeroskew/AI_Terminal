@@ -71,7 +71,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("SNIPPETS").size(12.0).family(bold()).color(TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 24.0, TEXT_DIM, "Close (Esc)").clicked() {
+                    if widgets::close_button(ui).clicked() {
                         close = true;
                     }
                     if ui.button("Edit snippets…").clicked() {

@@ -104,22 +104,18 @@ impl App {
         let m = egui::Modal::new(id).area(area).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(0)).show(ctx, |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
-            // Drag bar. Only the visible bar drags: it spans the content column, left of the close button
-            // (which sits 10 px from the top and right edges, 28 px square).
+            // Invisible drag strip: the empty header row across the whole window, up to the close button
+            // (which sits CLOSE_INSET from the top and right edges, like in the other windows).
+            // Nothing is painted and the cursor stays a plain arrow.
             let top = ui.max_rect().min;
-            let bar = egui::Rect::from_min_max(egui::pos2(top.x + 191.0 + 10.0, top.y + 10.0), egui::pos2(top.x + size.x - 48.0, top.y + 38.0));
+            let (inset, close_w) = (widgets::CLOSE_INSET, widgets::CLOSE_SIZE);
+            // Gap above the page content, and the height of the draggable header (down past the page title).
+            const CONTENT_TOP: f32 = 14.0;
+            const HEADER_H: f32 = 44.0;
+            let bar = egui::Rect::from_min_max(top, egui::pos2(top.x + size.x - inset - close_w - 6.0, top.y + HEADER_H));
             let drag = ui.interact(bar, id.with("drag"), Sense::drag());
             if drag.dragged() {
                 drag_delta = drag.drag_delta();
-            }
-            let active = drag.dragged() || drag.hovered();
-            ui.painter().rect_filled(bar, 6.0, if active { BORDER } else { CARD });
-            let grip = egui::Rect::from_center_size(bar.center(), Vec2::new(40.0, 4.0));
-            ui.painter().rect_filled(grip, 2.0, if active { TEXT_DIM } else { TEXT_FAINT });
-            if drag.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-            } else if drag.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
@@ -151,31 +147,36 @@ impl App {
                 ui.painter().rect_filled(sep, 0.0, BORDER);
                 // Page content.
                 ui.allocate_ui_with_layout(Vec2::new(size.x - 191.0, size.y), Layout::top_down(Align::Min), |ui| {
-                    // Same 10 px gap above and to the right of the close button.
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.add_space(ui.available_width() - 38.0);
-                        if widgets::icon_button(ui, Icon::Close, 28.0, TEXT_DIM, "Close (Esc)").clicked() {
-                            close = true;
-                        }
-                    });
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
-                        egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 28, top: 0, bottom: 24 }).show(ui, |ui| {
-                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
-                            match page_now {
-                                OptPage::Terminal => self.options_terminal(ui),
-                                OptPage::Images => self.options_images(ui),
-                                OptPage::General => self.options_general(ui),
-                                OptPage::Shortcuts => self.options_shortcuts(ui),
-                                OptPage::Snippets => self.options_snippets(ui),
-                                OptPage::Scripts => self.options_scripts(ui),
-                                OptPage::Agents => self.options_agents(ui),
-                                OptPage::About => self.options_about(ui),
-                            }
+                    // The page starts right at the top (title level with "OPTIONS"); the close button is
+                    // drawn over the top-right corner afterwards.
+                    ui.add_space(CONTENT_TOP);
+                    // Keep the scroll area (and its bar) off the window's border and rounded corners.
+                    const EDGE: f32 = 6.0;
+                    let scroll_size = Vec2::new(ui.available_width() - EDGE, ui.available_height() - EDGE);
+                    ui.allocate_ui_with_layout(scroll_size, Layout::top_down(Align::Min), |ui| {
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
+                            egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 22, top: 0, bottom: 18 }).show(ui, |ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+                                match page_now {
+                                    OptPage::Terminal => self.options_terminal(ui),
+                                    OptPage::Images => self.options_images(ui),
+                                    OptPage::General => self.options_general(ui),
+                                    OptPage::Shortcuts => self.options_shortcuts(ui),
+                                    OptPage::Snippets => self.options_snippets(ui),
+                                    OptPage::Scripts => self.options_scripts(ui),
+                                    OptPage::Agents => self.options_agents(ui),
+                                    OptPage::About => self.options_about(ui),
+                                }
+                            });
                         });
                     });
                 });
             });
+            // Same gap above and to the right of the close button.
+            let close_rect = egui::Rect::from_min_size(egui::pos2(top.x + size.x - inset - close_w, top.y + inset), Vec2::splat(close_w));
+            if ui.put(close_rect, |ui: &mut egui::Ui| widgets::close_button(ui)).clicked() {
+                close = true;
+            }
         });
         if m.should_close() {
             close = true;
@@ -572,6 +573,7 @@ impl App {
         });
         ui.add_space(8.0);
         Self::opt_check(ui, &mut self.s.flash_taskbar, "Flash the taskbar when a session needs attention", "Flash the taskbar button a few times when a session needs attention and the window isn't focused.");
+        Self::opt_check(ui, &mut self.s.taskbar_progress, "Show progress on the taskbar while working", "Show an animated progress bar on the taskbar button while any session is working.");
         Self::opt_check(ui, &mut self.s.badge_count, "Show attention count on the taskbar badge", "Show the number of sessions needing attention on the taskbar badge instead of a single mark.");
         for (label, value, default) in [("Badge color", 0usize, [0xe5u8, 0x14, 0x14]), ("Badge text color", 1, [0xff, 0xff, 0xff])] {
             ui.horizontal(|ui| {

@@ -73,7 +73,7 @@ pub fn apply_style(ctx: &egui::Context, ui_size: f32) {
     s.button_padding = egui::vec2(8.0, 4.0);
     s.menu_margin = egui::Margin::same(6);
     s.interact_size.y = 24.0;
-    s.scroll.bar_width = 8.0;
+    s.scroll.bar_width = SCROLL_BAR_W;
     s.scroll.floating = true;
 
     use egui::TextStyle::*;
@@ -84,6 +84,15 @@ pub fn apply_style(ctx: &egui::Context, ui_size: f32) {
     style.text_styles.insert(Monospace, FontId::new(ui_size, code()));
     ctx.set_theme(egui::Theme::Dark);
     ctx.set_style_of(egui::Theme::Dark, style);
+}
+
+/// Width of every scroll bar (floating ones at full size, and solid ones).
+pub const SCROLL_BAR_W: f32 = 8.0;
+
+/// A scroll bar that takes its own space (for content the floating bar would cover), drawn the
+/// same as the app's floating bars at full size so the two kinds look alike.
+pub fn solid_scroll() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle { bar_width: SCROLL_BAR_W, bar_inner_margin: 4.0, foreground_color: true, ..egui::style::ScrollStyle::solid() }
 }
 
 /// Font folders: the system one and the per-user one.

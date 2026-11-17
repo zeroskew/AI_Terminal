@@ -116,7 +116,7 @@ impl App {
                 widgets::paint_icon(ui.painter(), Icon::Plugin, r.center(), 15.0, TEXT_DIM);
                 ui.label(RichText::new("PLUGINS").size(12.5).family(bold()).color(TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 26.0, TEXT_DIM, "Close (Esc)").clicked() {
+                    if widgets::close_button(ui).clicked() {
                         close = true;
                     }
                     let tip = if codex { "codex plugin marketplace upgrade" } else { "claude plugin marketplace update" };
@@ -308,7 +308,7 @@ impl App {
             // (always shown when there's more to scroll) rather than the app's hover-only floating ones.
             let gap = ui.spacing().item_spacing.x;
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            ui.spacing_mut().scroll = crate::theme::solid_scroll();
             // List (only the rows in view are drawn: Codex lists thousands of plugins).
             ui.allocate_ui_with_layout(Vec2::new(width * 0.38, body_h), Layout::top_down(Align::Min), |ui| {
                 egui::ScrollArea::vertical().id_salt(("plugin_list", codex)).max_height(body_h).auto_shrink([false, false]).show_hinted(ui, |ui| {

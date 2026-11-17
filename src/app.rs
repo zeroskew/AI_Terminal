@@ -148,6 +148,12 @@ struct Row {
     archived: bool,
     /// In the Saved for later group.
     later: bool,
+    /// Unix seconds when it was created (0 = unknown).
+    created: u64,
+    /// Estimated cost so far.
+    cost: Option<f64>,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 impl Row {
@@ -291,6 +297,8 @@ pub struct Settings {
     pub notify_sound: bool,
     pub flash_taskbar: bool,
     pub badge_count: bool,
+    /// Show an indeterminate progress bar on the taskbar button while a session is working.
+    pub taskbar_progress: bool,
     pub badge_color: [u8; 3],
     pub badge_text_color: [u8; 3],
     pub debug_logging: bool,
@@ -381,6 +389,7 @@ impl Default for Settings {
             notify_sound: true,
             flash_taskbar: false,
             badge_count: false,
+            taskbar_progress: true,
             badge_color: [0xe5, 0x14, 0x14],
             badge_text_color: [0xff, 0xff, 0xff],
             debug_logging: false,
@@ -571,6 +580,9 @@ pub struct App {
     context_info: Option<context_info::ContextInfo>,
     /// Home's "Remove" on a project asks first: the project it's for.
     confirm_remove_project: Option<PathBuf>,
+    /// The sidebar's group menus ask first: (project, true = delete all Archived,
+    /// false = archive all Saved for later).
+    confirm_group: Option<(PathBuf, bool)>,
     /// Closing the window while sessions are working asks first.
     confirm_quit: bool,
     /// "Close Anyway" was picked: let the next close request through.
@@ -620,6 +632,7 @@ pub struct App {
     cmd_due: Vec<(u64, std::time::Instant, String)>,
     /// Taskbar badge last drawn (Some(0) = mark, Some(n) = count, None = nothing yet).
     last_badge: Option<Option<usize>>,
+    last_progress: Option<bool>,
     /// The session the last notification was about (clicking the toast opens it).
     notified: Option<u64>,
     last_manage: std::time::Instant,
@@ -746,6 +759,7 @@ impl App {
             confirm_close: None,
             context_info: None,
             confirm_remove_project: None,
+            confirm_group: None,
             confirm_quit: false,
             quit_confirmed: false,
             limits: None,
@@ -780,6 +794,7 @@ impl App {
             enter_due: Vec::new(),
             cmd_due: Vec::new(),
             last_badge: None,
+            last_progress: None,
             notified: None,
             last_manage: std::time::Instant::now(),
             start_hidden: std::env::args().any(|a| a == "--minimized"),
@@ -1450,6 +1465,19 @@ impl App {
             self.last_badge = Some(want);
         }
 
+        // Taskbar progress: an indeterminate (marquee) bar while any session is working.
+        let working = self.s.taskbar_progress && self.tabs.iter().any(|t| t.sess.busy && t.sess.exited.is_none());
+        if self.last_progress != Some(working) {
+            let who: Vec<String> = self.tabs.iter().filter(|t| t.sess.busy && t.sess.exited.is_none()).map(|t| format!("#{} {}", t.sess.id, t.sess.display_name())).collect();
+            crate::dlog!("taskbar progress: {working} (busy: {})", who.join(", "));
+            winsys::set_progress_busy(working);
+            self.last_progress = Some(working);
+        }
+        // Come back to notice a turn that ended without a Stop (20 s of silence, above).
+        if self.tabs.iter().any(|t| t.sess.busy && t.sess.exited.is_none()) {
+            ctx.request_repaint_after(Duration::from_secs(5));
+        }
+
         // Session management: idle timeout and memory threshold (every 15 s).
         if self.last_manage.elapsed() >= Duration::from_secs(15) {
             self.last_manage = std::time::Instant::now();
@@ -1519,18 +1547,12 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        if ctx.input(|i| i.time) < 6.0 {
-            crate::titlebar::apply();
-            ctx.request_repaint_after(Duration::from_millis(250));
-        }
-        if self.applied.0 != self.s.code_font || self.applied.1 != self.s.ui_size {
-            install_fonts(&ctx, &self.s.code_font);
-            apply_style(&ctx, self.s.ui_size);
-            self.applied = (self.s.code_font.clone(), self.s.ui_size);
-        }
-        self.cache.pump(&ctx);
+    /// Everything that isn't drawing: sessions' output, hook events, MCP calls, housekeeping.
+    /// eframe keeps calling this while the window is minimized or hidden in the tray (and `ui`
+    /// isn't), so a session finishing in the background still clears its "working" state, the
+    /// taskbar progress and sends its notification right away.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let ctx = ctx.clone();
         agents::COLOR_TAG_PROMPT.store(self.s.color_tag_prompt && self.s.color_tags, std::sync::atomic::Ordering::Relaxed);
         agents::NAME_SESSION_PROMPT.store(self.s.name_sessions, std::sync::atomic::Ordering::Relaxed);
 
@@ -1538,11 +1560,13 @@ impl eframe::App for App {
         let active = self.active;
         let claimed: std::collections::HashSet<String> =
             self.tabs.iter().filter_map(|t| t.sess.agent_id.clone()).chain(self.dormant.iter().filter_map(|d| d.saved.agent_id.clone())).collect();
+        let color_tags = self.s.color_tags;
         for t in &mut self.tabs {
             t.sess.poll_agent(&claimed);
             let (clip, bell) = t.sess.poll();
             if let Some(clip) = clip {
-                ctx.copy_text(clip);
+                // Claude Code's own copy (its in-app selection) carries the raw tags.
+                ctx.copy_text(if color_tags { crate::colortags::strip(&clip) } else { clip });
             }
             t.bell |= bell;
             // Only a change to the screen's text counts as unseen output: Claude repaints and
@@ -1559,6 +1583,22 @@ impl eframe::App for App {
             }
         }
         self.mcp_pump(&ctx);
+        self.merge_found_claude();
+        self.housekeeping(&ctx);
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        if ctx.input(|i| i.time) < 6.0 {
+            crate::titlebar::apply();
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if self.applied.0 != self.s.code_font || self.applied.1 != self.s.ui_size {
+            install_fonts(&ctx, &self.s.code_font);
+            apply_style(&ctx, self.s.ui_size);
+            self.applied = (self.s.code_font.clone(), self.s.ui_size);
+        }
+        self.cache.pump(&ctx);
         // egui hears of window focus only from Windows' focus messages; if it never had it, make
         // sure the keyboard really comes to us while the window is in front.
         if !ctx.input(|i| i.focused) && winsys::claim_keyboard_focus() {
@@ -1573,8 +1613,6 @@ impl eframe::App for App {
                 crate::dlog!("click at {pos:?}: layer {layer:?}, keyboard focus {focused:?}, modal layer {modal:?}, window focused {win_focused}");
             }
         }
-        self.merge_found_claude();
-        self.housekeeping(&ctx);
         let title = self.active_tab().map(|t| format!("{} — AI Terminal", t.sess.display_name())).unwrap_or_else(|| "AI Terminal".into());
         // Only when it changes: every viewport command requests another frame, so sending it
         // each frame kept the app redrawing nonstop.
@@ -1583,7 +1621,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.project_settings.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.project_settings.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_group.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1673,6 +1711,7 @@ impl eframe::App for App {
         self.confirm_close_dialog(&ctx);
         self.context_info_dialog(&ctx);
         self.remove_project_dialog(&ctx);
+        self.group_dialog(&ctx);
         self.project_settings_dialog(&ctx);
         self.quit_dialog(&ctx);
         self.update_dialog(&ctx);

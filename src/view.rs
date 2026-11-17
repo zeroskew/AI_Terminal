@@ -50,6 +50,9 @@ pub struct ViewState {
     last_click: Option<(f64, Point, u8)>,
     scroll_accum: f32,
     mouse_down_reported: Option<u8>,
+    /// Per screen row, as drawn last frame: displayed column -> terminal column. Set for rows
+    /// whose color tags were collapsed (the tag characters still take terminal columns).
+    col_maps: Vec<Option<Vec<usize>>>,
 }
 
 #[derive(Clone)]
@@ -104,10 +107,16 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
         ui.memory_mut(|m| m.set_focus_lock_filter(id, egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true }));
     }
 
+    let col_maps = std::mem::take(&mut st.col_maps);
     let to_cell = |p: Pos2| -> (usize, usize, Side) {
         let x = ((p.x - origin.x) / cw).max(0.0);
-        let col = (x.floor() as usize).min(cols - 1);
         let row = (((p.y - origin.y) / ch).max(0.0).floor() as usize).min(rows - 1);
+        let col = (x.floor() as usize).min(cols - 1);
+        // Map the column on screen back to the terminal column it shows.
+        let col = match col_maps.get(row).and_then(|m| m.as_ref()) {
+            Some(m) => m.get(col).copied().unwrap_or(cols - 1).min(cols - 1),
+            None => col,
+        };
         let side = if x.fract() < 0.5 { Side::Left } else { Side::Right };
         (row, col, side)
     };
@@ -129,7 +138,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
                     }
                 }
                 Event::Copy => {
-                    let text = s.term.lock().selection_to_string();
+                    let text = s.term.lock().selection_to_string().map(|t| if opt.color_tags { crate::colortags::strip(&t) } else { t });
                     match text {
                         Some(t) if !t.is_empty() => {
                             actions.push(Action::Copy(t));
@@ -235,15 +244,19 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
     } else {
         let offset = s.term.lock().grid().display_offset() as i32;
         let grid_point = |row: usize, col: usize| Point::new(Line(row as i32 - offset), Column(col));
+        // The latest pointer position this frame. `interact_pointer_pos` can lag or be missing on
+        // the frame the button is released, which used to drop the final stretch of a fast drag.
+        let latest = ui.input(|i| i.pointer.latest_pos()).or_else(|| resp.interact_pointer_pos());
         if resp.drag_started_by(PointerButton::Primary) {
-            if let Some(p) = resp.interact_pointer_pos() {
+            // Anchor where the button went down, not where egui's drag threshold was crossed.
+            if let Some(p) = ui.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos()) {
                 let (r, c, side) = to_cell(p);
                 s.term.lock().selection = Some(Selection::new(SelectionType::Simple, grid_point(r, c), side));
                 st.selecting = true;
             }
         }
-        if st.selecting && resp.dragged_by(PointerButton::Primary) {
-            if let Some(p) = resp.interact_pointer_pos() {
+        if st.selecting && (resp.dragged_by(PointerButton::Primary) || resp.drag_stopped()) {
+            if let Some(p) = latest {
                 // Auto-scroll when dragging past the top / bottom edge.
                 if p.y < inner.top() {
                     s.term.lock().scroll_display(Scroll::Delta(1));
@@ -280,7 +293,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
         }
         if resp.secondary_clicked() {
             // Windows Terminal style: right-click copies a selection, otherwise pastes.
-            let text = s.term.lock().selection_to_string();
+            let text = s.term.lock().selection_to_string().map(|t| if opt.color_tags { crate::colortags::strip(&t) } else { t });
             match text {
                 Some(t) if !t.is_empty() => {
                     actions.push(Action::Copy(t));
@@ -336,50 +349,17 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
     };
 
     // Color tags in the agent's text ({green}OK{/}); not on the row being typed.
+    let mut new_col_maps: Vec<Option<Vec<usize>>> = vec![None; rows];
     if opt.color_tags {
         let cursor_row = cursor.map(|c| c.0);
         for (r, row) in grid.iter_mut().enumerate() {
             if Some(r) == cursor_row {
                 continue;
             }
-            let chars: Vec<char> = row.iter().map(|c| c.c).collect();
-            let Some(lay) = crate::colortags::layout(&chars) else { continue };
-            let fg_of = |c: crate::colortags::TagColor| match c {
-                crate::colortags::TagColor::Ansi(k) => pal.ansi[k],
-                crate::colortags::TagColor::Rgb(v) => Color32::from_rgb(v[0], v[1], v[2]),
-            };
-            // Named backgrounds use Claude Code's dark diff shades (rows darker, spans brighter);
-            // #rrggbb is used as given.
-            let bg_of = |c: crate::colortags::TagColor, row: bool| match crate::colortags::bg_shade(c, row) {
-                Some(v) => Color32::from_rgb(v[0], v[1], v[2]),
-                None => fg_of(c),
-            };
-            let row_bg = lay.row_bg.map(|c| bg_of(c, true));
-            let blank = SnapCell { c: ' ', fg: term_fg, bg: row_bg.unwrap_or(term_bg), flags: Flags::empty(), selected: false, extra: None };
-            let new_row: Vec<SnapCell> = lay
-                .cols
-                .iter()
-                .map(|o| match *o {
-                    crate::colortags::Out::Src(i, st) => {
-                        let mut cell = row[i].clone();
-                        if let Some(c) = st.fg {
-                            cell.fg = fg_of(c);
-                        }
-                        if let Some(c) = st.bg {
-                            cell.bg = bg_of(c, false);
-                        } else if let Some(rb) = row_bg {
-                            if cell.bg == term_bg {
-                                cell.bg = rb;
-                            }
-                        }
-                        cell
-                    }
-                    crate::colortags::Out::Blank => blank.clone(),
-                })
-                .collect();
-            *row = new_row;
+            new_col_maps[r] = collapse_color_tags(row, cols, &pal, term_fg, term_bg);
         }
     }
+    st.col_maps = new_col_maps;
 
     // ---- Paint -----------------------------------------------------------------------------
     let painter = ui.painter_at(full);
@@ -603,7 +583,9 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
     // it. Only the line under the mouse is examined.
     if mods.ctrl {
         if let Some(pos) = resp.hover_pos() {
-            let (pr, pc, _) = to_cell(pos);
+            // Displayed cell (the grid below is the drawn one, after color-tag collapsing).
+            let pr = (((pos.y - origin.y) / ch).max(0.0).floor() as usize).min(rows - 1);
+            let pc = ((((pos.x - origin.x) / cw).max(0.0)).floor() as usize).min(cols - 1);
             // The logical line (soft-wrapped rows joined) around the pointer's row.
             let mut r0 = pr;
             while r0 > 0 && wrapped[r0 - 1] {
@@ -897,6 +879,72 @@ fn paint_bg_image(p: &egui::Painter, cache: &mut ImageCache, path: &std::path::P
 }
 
 /// Finds `q` in every line of the terminal (scrollback included).
+/// Collapses the color tags in one row (`{green}OK{/}` -> colored `OK`, padding where the tags
+/// were). Returns the displayed column -> terminal column map, or None if the row has no tags.
+fn collapse_color_tags(row: &mut Vec<SnapCell>, cols: usize, pal: &crate::term_theme::Palette, term_fg: Color32, term_bg: Color32) -> Option<Vec<usize>> {
+        let chars: Vec<char> = row.iter().map(|c| c.c).collect();
+        let lay = crate::colortags::layout(&chars)?;
+        let fg_of = |c: crate::colortags::TagColor| match c {
+            crate::colortags::TagColor::Ansi(k) => pal.ansi[k],
+            crate::colortags::TagColor::Rgb(v) => Color32::from_rgb(v[0], v[1], v[2]),
+        };
+        // Named backgrounds use Claude Code's dark diff shades (rows darker, spans brighter);
+        // #rrggbb is used as given.
+        let bg_of = |c: crate::colortags::TagColor, row: bool| match crate::colortags::bg_shade(c, row) {
+            Some(v) => Color32::from_rgb(v[0], v[1], v[2]),
+            None => fg_of(c),
+        };
+        let row_bg = lay.row_bg.map(|c| bg_of(c, true));
+        let blank = SnapCell { c: ' ', fg: term_fg, bg: row_bg.unwrap_or(term_bg), flags: Flags::empty(), selected: false, extra: None };
+        // Displayed column -> terminal column. Padding stands for the column after the text
+        // before it; trailing padding stands for the end of the row.
+        let last_src = lay.cols.iter().rposition(|o| matches!(o, crate::colortags::Out::Src(..)));
+        let mut prev: Option<usize> = None;
+        let map: Vec<usize> = lay
+            .cols
+            .iter()
+            .enumerate()
+            .map(|(d, o)| match *o {
+                crate::colortags::Out::Src(i, _) => {
+                    prev = Some(i);
+                    i
+                }
+                crate::colortags::Out::Blank if last_src.is_none_or(|l| d > l) => cols - 1,
+                crate::colortags::Out::Blank => prev.map_or(0, |i| (i + 1).min(cols - 1)),
+            })
+            .collect();
+        let new_row: Vec<SnapCell> = lay
+            .cols
+            .iter()
+            .zip(&map)
+            .map(|(o, &src)| match *o {
+                crate::colortags::Out::Src(i, st) => {
+                    let mut cell = row[i].clone();
+                    if let Some(c) = st.fg {
+                        cell.fg = fg_of(c);
+                    }
+                    if let Some(c) = st.bg {
+                        cell.bg = bg_of(c, false);
+                    } else if let Some(rb) = row_bg {
+                        if cell.bg == term_bg {
+                            cell.bg = rb;
+                        }
+                    }
+                    cell
+                }
+                // Padding takes the selection and background of the terminal cell it stands for,
+                // so highlights the app paints itself (Claude Code's own selection) reach the end.
+                crate::colortags::Out::Blank => {
+                    let under = row.get(src);
+                    let bg = under.map(|c| c.bg).filter(|&b| b != term_bg).unwrap_or(blank.bg);
+                    SnapCell { selected: under.is_some_and(|c| c.selected), bg, ..blank.clone() }
+                }
+            })
+            .collect();
+    *row = new_row;
+    Some(map)
+}
+
 fn search_grid(t: &alacritty_terminal::Term<crate::session::Listener>, q: &str, case: bool) -> Vec<(i32, usize, usize)> {
     let mut out = Vec::new();
     if q.is_empty() {
@@ -1339,4 +1387,27 @@ fn key_bytes(key: Key, m: Modifiers, mode: TermMode, shift_enter_alt: bool) -> O
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod color_tag_tests {
+    use super::*;
+
+    #[test]
+    fn padding_keeps_selection_and_highlight() {
+        let pal = crate::term_theme::TermTheme::default().palette();
+        let (bg, hl) = (Color32::BLACK, Color32::BLUE);
+        let cols = 40;
+        let text = "  - {green}Last used{/}: the used x";
+        // A row the app itself highlighted from column 2 to the end, also selected by us.
+        let mut row: Vec<SnapCell> = (0..cols)
+            .map(|i| SnapCell { c: text.chars().nth(i).unwrap_or(' '), fg: Color32::WHITE, bg: if i >= 2 { hl } else { bg }, flags: Flags::empty(), selected: true, extra: None })
+            .collect();
+        let map = collapse_color_tags(&mut row, cols, &pal, Color32::WHITE, bg).unwrap();
+        assert_eq!(&map[..5], &[0, 1, 2, 3, 11]);
+        assert_eq!(map[cols - 1], cols - 1);
+        assert!(row.iter().all(|c| c.selected));
+        assert!(row[2..].iter().all(|c| c.bg == hl));
+        assert_eq!(row[0].bg, bg);
+    }
 }

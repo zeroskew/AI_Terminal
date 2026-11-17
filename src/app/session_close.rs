@@ -47,7 +47,7 @@ impl App {
     }
 
     /// Stops the session, removes it from the list and deletes its conversation files.
-    fn delete_session(&mut self, id: u64) {
+    pub(super) fn delete_session(&mut self, id: u64) {
         let found = self.tabs.iter().find(|t| t.sess.id == id).map(|t| (t.sess.profile.kind, t.sess.agent_id.clone(), t.project.clone()));
         let found = found.or_else(|| self.dormant.iter().find(|d| d.id == id).map(|d| (d.saved.profile.kind, d.saved.agent_id.clone(), d.saved.project.clone())));
         self.dormant.retain(|d| d.id != id);

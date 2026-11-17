@@ -168,7 +168,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Context").size(18.0).family(bold()).color(Color32::WHITE));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 24.0, TEXT_DIM, "Close (Esc)").clicked() {
+                    if widgets::close_button(ui).clicked() {
                         close = true;
                     }
                 });
@@ -180,7 +180,7 @@ impl App {
             // A solid scroll bar that takes its own space: the app's floating ones are drawn
             // over the content, on top of the table's last column.
             ui.scope(|ui| {
-                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                ui.spacing_mut().scroll = crate::theme::solid_scroll();
                 egui::ScrollArea::both().max_height(max_h).auto_shrink([false, true]).show_hinted(ui, |ui| {
                     if can_report {
                         match &report {

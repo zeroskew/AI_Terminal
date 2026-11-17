@@ -483,6 +483,25 @@ mod imp {
             }
         });
     }
+
+    /// Shows (or clears) the indeterminate "working" progress on the taskbar button.
+    pub fn set_progress_busy(busy: bool) {
+        let Some(h) = main_hwnd() else { return };
+        TASKBAR.with(|t| {
+            let Some(t) = t else { return };
+            unsafe {
+                if busy {
+                    let _ = t.SetProgressState(h, TBPF_INDETERMINATE);
+                } else {
+                    // Leave the marquee through a normal (empty) state first: going straight from
+                    // indeterminate to none doesn't always stop the animation.
+                    let _ = t.SetProgressState(h, TBPF_NORMAL);
+                    let _ = t.SetProgressValue(h, 0, 100);
+                    let _ = t.SetProgressState(h, TBPF_NOPROGRESS);
+                }
+            }
+        });
+    }
 }
 
 #[cfg(windows)]

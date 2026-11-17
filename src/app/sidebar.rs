@@ -151,6 +151,10 @@ impl App {
             pin: t.pin,
             archived: false,
             later: false,
+            created: t.created,
+            cost: t.sess.cost.map(|c| c.usd),
+            model: t.sess.model.clone().or_else(|| t.sess.opts.model.clone()),
+            effort: t.sess.effort(),
             })
             .collect();
         v.extend(self.dormant.iter().filter(|d| d.saved.project == p).map(|d| Row {
@@ -170,6 +174,10 @@ impl App {
             pin: d.saved.pin,
             archived: d.saved.archived,
             later: d.saved.later,
+            created: d.saved.created,
+            cost: d.saved.cost,
+            model: d.saved.opts.model.clone(),
+            effort: d.saved.opts.effort.clone(),
         }));
         let on_top = self.s.active_on_top;
         // Pinned first (in their order), then the active (running) ones if set, then the rest;
@@ -318,6 +326,7 @@ impl App {
         let mut archive_req: Option<(u64, bool)> = None;
         let mut toggle_archived = false;
         let mut toggle_later = false;
+        let mut group_req: Option<bool> = None;
         let mut later_req: Option<(u64, bool)> = None;
         let mut move_req: Option<(u64, PathBuf)> = None;
         // "Move to project" targets: the other projects, in their color.
@@ -332,7 +341,19 @@ impl App {
         let show_archived = self.show_archived || !filter.is_empty();
         let show_later = self.show_later || !filter.is_empty();
         let today = local_day(now_secs());
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
+        // The list reaches into the panel's right margin, so its scroll bar sits next to the
+        // panel edge and wakes up when the pointer is anywhere near it (the rows keep their width:
+        // the extra strip is a content margin under the bar). It stops short of the panel's
+        // resize handle.
+        const GUTTER: f32 = 6.0;
+        // Only the panel's own area is reported as used: reporting the widened rect would make
+        // the side panel grow by GUTTER every frame (it sizes itself to its content).
+        let panel_rect = ui.available_rect_before_wrap();
+        let list_rect = egui::Rect::from_min_max(panel_rect.min, egui::pos2(panel_rect.max.x + GUTTER, panel_rect.max.y));
+        let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list_rect));
+        list_ui.set_clip_rect(list_rect.intersect(ui.clip_rect().expand2(Vec2::new(GUTTER, 0.0))));
+        ui.advance_cursor_after_rect(panel_rect);
+        egui::ScrollArea::vertical().content_margin(egui::Margin { right: GUTTER as i8, ..Default::default() }).auto_shrink([false, false]).show_hinted(&mut list_ui, |ui| {
             let mut last_group: Option<String> = None;
             let mut pinned_rects: Vec<(u64, egui::Rect)> = Vec::new();
             for row in &rows {
@@ -357,9 +378,21 @@ impl App {
                 if last_group.as_ref() != Some(&group) {
                     ui.add_space(4.0);
                     if row.archived {
-                        toggle_archived |= section_header(ui, "ARCHIVED", archived, open);
+                        let r = section_header(ui, "ARCHIVED", archived, open);
+                        toggle_archived |= r.clicked();
+                        r.context_menu(|ui| {
+                            if ui.button("Delete all…").on_hover_text("Delete every archived session of this project and its conversation (asks first)").clicked() {
+                                group_req = Some(true);
+                            }
+                        });
                     } else if row.later {
-                        toggle_later |= section_header(ui, "SAVED FOR LATER", later, open);
+                        let r = section_header(ui, "SAVED FOR LATER", later, open);
+                        toggle_later |= r.clicked();
+                        r.context_menu(|ui| {
+                            if ui.button("Archive all…").on_hover_text("Move every saved-for-later session of this project to Archived (asks first)").clicked() {
+                                group_req = Some(false);
+                            }
+                        });
                     } else {
                         ui.label(RichText::new(group.to_uppercase()).size(10.5).family(bold()).color(TEXT_FAINT));
                     }
@@ -498,7 +531,7 @@ impl App {
                 } else if row.later {
                     "\nSaved for later — click to resume".to_string()
                 } else if !row.live {
-                    if row.resumable { "\nNot running — click to resume the conversation".to_string() } else { "\nNot running — click to start".to_string() }
+                    String::new()
                 } else {
                     row.exited.map(|c| format!("\nExited with code {c}")).unwrap_or_default()
                 };
@@ -508,7 +541,24 @@ impl App {
                 } else {
                     row.attention_msg.as_ref().map(|m| format!("\nNeeds you: {m}")).unwrap_or_default()
                 };
-                let detail = format!("{}{}{}{now}", row.profile.name, if row.unrestricted { " · unrestricted" } else { "" }, state);
+                // Profile · model · effort, then when it was created / last used and its cost.
+                let mut head = vec![row.profile.name.clone()];
+                head.extend(row.model.as_deref().filter(|m| !m.is_empty()).map(crate::cost::model_label));
+                head.extend(row.effort.clone().filter(|e| !e.is_empty()));
+                if row.unrestricted {
+                    head.push("unrestricted".into());
+                }
+                let mut info = String::new();
+                if row.created > 0 {
+                    info += &format!("\nCreated {}", search_ui::fmt_time(row.created));
+                }
+                if row.used > row.created {
+                    info += &format!("\nLast used {}", search_ui::fmt_time(row.used));
+                }
+                if let Some(c) = row.cost.filter(|c| *c > 0.0) {
+                    info += &format!("\nCost {}", crate::cost::fmt_usd(c));
+                }
+                let detail = format!("{}{info}{state}{now}", head.join(" · "));
                 let (live, resumable, unrestricted, agent) = (row.live, row.resumable, row.unrestricted, row.profile.is_agent());
                 let pinned = row.pin > 0;
                 let is_archived = row.archived;
@@ -713,12 +763,73 @@ impl App {
         if let Some(id) = restart_req {
             self.restart(&ctx, id);
         }
+        if let Some(delete) = group_req {
+            self.confirm_group = Some((project.clone(), delete));
+        }
+    }
+
+    /// The listed (not running) sessions of a project in Archived (`archived`) or Saved for later.
+    fn group_ids(&self, project: &Path, archived: bool) -> Vec<u64> {
+        self.dormant
+            .iter()
+            .filter(|d| d.saved.project == project && if archived { d.saved.archived } else { d.saved.later && !d.saved.archived })
+            .map(|d| d.id)
+            .collect()
+    }
+
+    /// Confirmation for the group menus: Archive all (Saved for later) / Delete all (Archived).
+    pub(super) fn group_dialog(&mut self, ctx: &egui::Context) {
+        let Some((project, delete)) = self.confirm_group.clone() else { return };
+        let n = self.group_ids(&project, delete).len();
+        if n == 0 {
+            self.confirm_group = None;
+            return;
+        }
+        let s = if n == 1 { "" } else { "s" };
+        let mut choice: Option<bool> = None;
+        let m = egui::Modal::new(egui::Id::unique("confirm_group")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(20)).show(ctx, |ui| {
+            ui.set_width(480.0);
+            let title = if delete { format!("Delete {n} archived session{s}?") } else { format!("Archive {n} saved-for-later session{s}?") };
+            ui.label(RichText::new(title).size(18.0).family(bold()).color(Color32::WHITE));
+            ui.add_space(8.0);
+            let text = if delete {
+                "They're removed from the list and their conversations are deleted from disk. This can't be undone."
+            } else {
+                "They move to the Archived group (still resumable; right-click > Restore to list brings one back)."
+            };
+            ui.label(RichText::new(text).color(TEXT_DIM));
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (label, col) = if delete { ("Delete all", Color32::from_rgb(170, 45, 45)) } else { ("Archive all", ACCENT) };
+                if ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(col).min_size(Vec2::new(90.0, 28.0))).clicked() {
+                    choice = Some(true);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(70.0, 28.0))).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if m.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        if let Some(ok) = choice {
+            self.confirm_group = None;
+            if ok {
+                for id in self.group_ids(&project, delete) {
+                    if delete {
+                        self.delete_session(id);
+                    } else {
+                        self.archive(id);
+                    }
+                }
+            }
+        }
     }
 }
 
 /// A collapsible group's header (Saved for later, Archived): "TITLE (n)" with an arrow; click
-/// to expand / collapse.
-fn section_header(ui: &mut Ui, title: &str, n: usize, open: bool) -> bool {
+/// to expand / collapse (the response, for its context menu).
+fn section_header(ui: &mut Ui, title: &str, n: usize, open: bool) -> egui::Response {
     ui.spacing_mut().item_spacing.y = 0.0;
     let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
     let col = if resp.hovered() { TEXT } else { TEXT_FAINT };
@@ -730,5 +841,5 @@ fn section_header(ui: &mut Ui, title: &str, n: usize, open: bool) -> bool {
     };
     ui.painter().add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
     ui.painter().text(egui::pos2(r.left() + 15.0, r.center().y), egui::Align2::LEFT_CENTER, format!("{title} ({n})"), egui::FontId::new(10.5, bold()), col);
-    resp.on_hover_text(if open { "Collapse" } else { "Expand" }).clicked()
+    resp.on_hover_text(if open { "Collapse" } else { "Expand" })
 }

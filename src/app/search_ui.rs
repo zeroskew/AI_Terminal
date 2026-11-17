@@ -36,7 +36,7 @@ struct SessInfo {
 const FEW: usize = 3;
 
 /// "Today 14:03", "Yesterday 09:12", "2026-11-03 18:40".
-fn fmt_time(secs: u64) -> String {
+pub(super) fn fmt_time(secs: u64) -> String {
     let local = secs as i64 + utc_offset();
     let (day, sod) = (local.div_euclid(86_400), local.rem_euclid(86_400));
     let hm = format!("{:02}:{:02}", sod / 3600, sod % 3600 / 60);
@@ -187,7 +187,7 @@ impl App {
                     ui.label(RichText::new("SEARCH").size(12.5).family(bold()).color(TEXT_DIM));
                     ui.label(RichText::new("messages in session transcripts").size(12.5).color(TEXT_FAINT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::icon_button(ui, Icon::Close, 24.0, TEXT_DIM, "Close (Esc)").clicked() {
+                        if widgets::close_button(ui).clicked() {
                             close = true;
                         }
                     });
@@ -195,7 +195,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let w = ui.available_width() - 90.0;
-                    let edit = ui.add(egui::TextEdit::singleline(&mut query).hint_text("Find textâ€¦").desired_width(w).margin(egui::Margin::symmetric(8, 5)));
+                    let edit = ui.add(egui::TextEdit::singleline(&mut query).hint_text("Find text…").desired_width(w).margin(egui::Margin::symmetric(8, 5)));
                     if focus {
                         edit.request_focus();
                     }
@@ -220,7 +220,7 @@ impl App {
                     }
                     if !(all || forced) {
                         if let Some(n) = &active_name {
-                            ui.label(RichText::new(format!("(only â€œ{n}â€)")).color(TEXT_FAINT).size(12.5));
+                            ui.label(RichText::new(format!("(only “{n}”)")).color(TEXT_FAINT).size(12.5));
                         }
                     }
                     ui.add_space(16.0);
@@ -239,14 +239,14 @@ impl App {
                         let summary = format!("{total} message{} in {} session{}", if total == 1 { "" } else { "s" }, found.len(), if found.len() == 1 { "" } else { "s" });
                         if !j.is_done() {
                             ui.spinner();
-                            ui.label(RichText::new(format!("Searching {} of {}â€¦  {summary}", j.scanned.load(std::sync::atomic::Ordering::Relaxed), j.total)).color(TEXT_DIM));
+                            ui.label(RichText::new(format!("Searching {} of {}…  {summary}", j.scanned.load(std::sync::atomic::Ordering::Relaxed), j.total)).color(TEXT_DIM));
                         } else if found.is_empty() {
-                            ui.label(RichText::new(format!("No messages contain â€œ{}â€.", j.query)).color(TEXT_DIM));
+                            ui.label(RichText::new(format!("No messages contain “{}”.", j.query)).color(TEXT_DIM));
                         } else {
                             ui.label(RichText::new(summary).color(TEXT_DIM));
                         }
                         if searched.is_some_and(|(a, d)| a != (all || active.is_none()) || d != days) && j.is_done() {
-                            ui.label(RichText::new("Â· settings changed, press Enter to search again").color(ORANGE).size(12.5));
+                            ui.label(RichText::new("· settings changed, press Enter to search again").color(ORANGE).size(12.5));
                         }
                     });
                     ui.add_space(4.0);
@@ -268,14 +268,14 @@ impl App {
                         };
                         egui::Frame::new().fill(CARD).corner_radius(6).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            // Header: icon, name, project Â· state; count and Open on the right.
+                            // Header: icon, name, project · state; count and Open on the right.
                             let head = ui.horizontal(|ui| {
                                 let (r, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                                 widgets::paint_icon(ui.painter(), icon.0, r.center(), 15.0, icon.1);
                                 ui.label(RichText::new(&name).family(bold()).color(TEXT));
                                 let mut sub = project.clone();
                                 if !state.is_empty() {
-                                    sub = if sub.is_empty() { state.to_string() } else { format!("{sub} Â· {state}") };
+                                    sub = if sub.is_empty() { state.to_string() } else { format!("{sub} · {state}") };
                                 }
                                 if !sub.is_empty() {
                                     ui.label(RichText::new(sub).color(TEXT_FAINT).size(12.5));
