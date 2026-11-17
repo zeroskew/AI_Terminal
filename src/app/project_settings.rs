@@ -197,7 +197,7 @@ impl App {
                 });
                 let has = bg.image.is_some();
                 Self::settings_row(ui, "Opacity", |ui| {
-                    ui.add_enabled(has, egui::Slider::new(&mut bg.opacity, 0.05..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                    ui.add_enabled(has, egui::Slider::new(&mut bg.opacity, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                 });
                 Self::settings_row(ui, "Blur", |ui| {
                     ui.add_enabled(has, egui::Slider::new(&mut bg.blur, 0.0..=40.0).step_by(0.5).custom_formatter(|v, _| if v == 0.0 { "Off".into() } else { format!("{v:.1} px") }))

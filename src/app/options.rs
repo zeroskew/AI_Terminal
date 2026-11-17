@@ -431,7 +431,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
                 Self::opt_label(ui, "Opacity");
-                ui.add_enabled(has, egui::Slider::new(&mut theme.bg_opacity, 0.05..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                ui.add_enabled(has, egui::Slider::new(&mut theme.bg_opacity, 0.01..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
             });
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
