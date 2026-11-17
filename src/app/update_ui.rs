@@ -7,7 +7,7 @@ use crate::update::{self, Status};
 impl App {
     /// Every frame: automatic checks, and a toast once a download is ready.
     pub(super) fn update_housekeeping(&mut self, ctx: &egui::Context) {
-        let schedule = update::Schedule { on_startup: self.s.update_on_startup, every_min: self.s.update_periodic.then_some(self.s.update_interval_min) };
+        let schedule = update::Schedule { on_startup: self.s.update_on_startup, periodic: self.s.update_periodic };
         update::auto_check(ctx, self.s.auto_update, &schedule);
         if let Status::Ready(tag) = update::status() {
             if self.update_announced.as_deref() != Some(tag.as_str()) {

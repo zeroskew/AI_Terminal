@@ -4,6 +4,7 @@
 mod agent_install;
 mod agents;
 mod app;
+mod color_picker;
 mod colortags;
 mod cost;
 mod dlog;
@@ -92,6 +93,12 @@ fn main() -> eframe::Result<()> {
         report_fatal(&format!("panic on thread '{thread}': {info}\n\n{bt}"));
         default_hook(info);
     }));
+    // Only one instance (Options > General): a second launch brings the running one to the front
+    // and exits. Started at sign-in (--minimized) while one already runs: just exit.
+    #[cfg(windows)]
+    if winsys::hand_off_to_running_instance(!args.iter().any(|a| a == "--minimized")) {
+        return Ok(());
+    }
     drop_parent_claude_env();
     update::init();
     let options = eframe::NativeOptions {
@@ -110,6 +117,9 @@ fn main() -> eframe::Result<()> {
     if let Err(e) = &result {
         report_fatal(&format!("{e}\n\n(debug: {e:?})\n\nIf this mentions OpenGL / glutin / WGL: the PC needs a graphics driver with OpenGL 2.0 or newer (Remote Desktop sessions, VMs and the \"Microsoft Basic Display Adapter\" often lack one)."));
     }
+    // Let a relaunch (update's "Restart now") start instead of handing off to this exiting process.
+    #[cfg(windows)]
+    winsys::release_single_instance();
     // The window is gone: install a downloaded update (and start again for "Restart now").
     update::apply_on_exit();
     result

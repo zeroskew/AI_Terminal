@@ -447,3 +447,93 @@ fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
     let (w, h) = (4.5, 2.5);
     p.add(Shape::line(vec![Pos2::new(c.x - w, c.y - h + 0.5), Pos2::new(c.x, c.y + h + 0.5), Pos2::new(c.x + w, c.y - h + 0.5)], Stroke::new(1.6, col)));
 }
+
+/// The accent colours offered for a project, tuned to read well on the dark bars.
+pub const ACCENTS: [(&str, [u8; 3]); 11] = [
+    ("Coral", [240, 113, 103]),
+    ("Amber", [240, 166, 62]),
+    ("Gold", [222, 198, 82]),
+    ("Lime", [140, 200, 86]),
+    ("Emerald", [62, 190, 128]),
+    ("Teal", [44, 186, 186]),
+    ("Sky", [76, 166, 240]),
+    ("Indigo", [120, 130, 240]),
+    ("Violet", [170, 114, 232]),
+    ("Pink", [230, 106, 170]),
+    ("Slate", [150, 160, 178]),
+];
+
+pub fn accent_color(rgb: [u8; 3]) -> Color32 {
+    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+/// A vertical glow: `color` at the bottom edge of `rect`, fading to nothing at the top.
+pub fn paint_glow_up(p: &egui::Painter, rect: Rect, color: Color32) {
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), Color32::TRANSPARENT);
+    mesh.colored_vertex(rect.right_top(), Color32::TRANSPARENT);
+    mesh.colored_vertex(rect.left_bottom(), color);
+    mesh.colored_vertex(rect.right_bottom(), color);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 3, 2);
+    p.add(Shape::mesh(mesh));
+}
+
+/// One round swatch: filled with `color`, or (None) an empty ring with a slash. A ring marks the
+/// current choice; hovering lifts it slightly.
+pub fn paint_swatch(p: &egui::Painter, c: Pos2, r: f32, color: Option<Color32>, selected: bool, hovered: bool) {
+    let r = if hovered { r + 1.0 } else { r };
+    match color {
+        Some(col) => {
+            p.circle_filled(c, r, col);
+            // A soft top highlight so the swatch reads as a bead, not a flat dot.
+            p.circle_filled(c - Vec2::new(r * 0.3, r * 0.35), r * 0.35, Color32::from_white_alpha(38));
+        }
+        None => {
+            p.circle_stroke(c, r - 0.5, Stroke::new(1.3, if hovered { TEXT_DIM } else { TEXT_FAINT }));
+            let k = (r - 0.5) * std::f32::consts::FRAC_1_SQRT_2;
+            p.line_segment([c + Vec2::new(-k, k), c + Vec2::new(k, -k)], Stroke::new(1.3, if hovered { TEXT_DIM } else { TEXT_FAINT }));
+        }
+    }
+    if selected {
+        p.circle_stroke(c, r + 3.0, Stroke::new(1.6, TEXT));
+    }
+}
+
+/// The accent picker (for a menu or popup): "None", the preset swatches and a custom colour.
+/// Returns the new choice when the user picks one.
+pub fn accent_picker(ui: &mut Ui, current: Option<[u8; 3]>) -> Option<Option<[u8; 3]>> {
+    let mut picked: Option<Option<[u8; 3]>> = None;
+    ui.label(egui::RichText::new("Accent colour").size(12.0).color(TEXT_DIM));
+    ui.add_space(4.0);
+    let cell = 26.0;
+    let per_row = 6;
+    let items: Vec<(&str, Option<[u8; 3]>)> = std::iter::once(("None", None)).chain(ACCENTS.iter().map(|(n, c)| (*n, Some(*c)))).collect();
+    for row in items.chunks(per_row) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (name, rgb) in row {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::splat(cell), Sense::click());
+                let hovered = resp.hovered();
+                if hovered {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                paint_swatch(ui.painter(), rect.center(), 8.0, rgb.map(accent_color), current == *rgb, hovered);
+                if resp.on_hover_text(*name).clicked() {
+                    picked = Some(*rgb);
+                    // A preset is a final choice; the custom picker below stays open while dragging.
+                    ui.close();
+                }
+            }
+        });
+    }
+    let custom = current.filter(|c| !ACCENTS.iter().any(|(_, a)| a == c));
+    ui.add_space(2.0);
+    egui::CollapsingHeader::new(egui::RichText::new("Custom…").size(12.0).color(TEXT_DIM)).id_salt("accent_custom").default_open(custom.is_some()).show(ui, |ui| {
+        let mut col = current.unwrap_or([76, 166, 240]);
+        if crate::color_picker::panel(ui, ui.scope_id().with("accent_custom_picker"), &mut col, false) {
+            picked = Some(Some(col));
+        }
+    });
+    picked
+}

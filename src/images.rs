@@ -96,6 +96,9 @@ pub enum Slot {
 
 type Loaded = Result<(ColorImage, [usize; 2], u64, Arc<image::RgbaImage>), String>;
 
+/// (path, width, height, blur sigma in tenths of a physical pixel).
+type SizedKey = (PathBuf, u32, u32, u32);
+
 struct Sized {
     tex: TextureHandle,
     used: u64,
@@ -106,10 +109,10 @@ pub struct ImageCache {
     tx: Sender<(PathBuf, Loaded)>,
     rx: Receiver<(PathBuf, Loaded)>,
     exists: HashMap<PathBuf, (bool, Instant)>,
-    /// Exact-size Lanczos copies: (path, width, height) → texture.
-    sized: HashMap<(PathBuf, u32, u32), Sized>,
-    sized_tx: Sender<(PathBuf, u32, u32, ColorImage)>,
-    sized_rx: Receiver<(PathBuf, u32, u32, ColorImage)>,
+    /// Exact-size Lanczos copies: (path, width, height, blur) → texture.
+    sized: HashMap<SizedKey, Sized>,
+    sized_tx: Sender<(SizedKey, ColorImage)>,
+    sized_rx: Receiver<(SizedKey, ColorImage)>,
     /// Paths with a resample running (one at a time per image).
     resampling: std::collections::HashSet<PathBuf>,
     frame: u64,
@@ -118,7 +121,7 @@ pub struct ImageCache {
 /// Longest side of the base texture (mipmapped); exact-size copies come from the source.
 const MAX_TEX: u32 = 2048;
 /// Longest side kept of the source for resampling.
-const MAX_SRC: u32 = 4096;
+pub const MAX_SRC: u32 = 4096;
 /// Exact-size copies kept (least recently used ones go).
 const MAX_SIZED: usize = 48;
 
@@ -157,10 +160,15 @@ impl ImageCache {
             };
             self.slots.insert(path, slot);
         }
-        while let Ok((path, w, h, img)) = self.sized_rx.try_recv() {
+        while let Ok((key, img)) = self.sized_rx.try_recv() {
+            let (path, w, h, blur) = key.clone();
             self.resampling.remove(&path);
-            let tex = ctx.load_texture(format!("{} {w}x{h}", path.display()), img, TextureOptions::LINEAR);
-            self.sized.insert((path, w, h), Sized { tex, used: self.frame });
+            let tex = ctx.load_texture(format!("{} {w}x{h} b{blur}", path.display()), img, TextureOptions::LINEAR);
+            // Copies of this image not drawn in the last couple of frames are stale sizes (e.g. from a
+            // window resize); drop them now so big background copies don't pile up in GPU memory.
+            let frame = self.frame;
+            self.sized.retain(|(p, ..), s| p != &path || s.used + 2 >= frame);
+            self.sized.insert(key, Sized { tex, used: self.frame });
         }
         if self.sized.len() > MAX_SIZED {
             let mut keys: Vec<_> = self.sized.iter().map(|(k, v)| (v.used, k.clone())).collect();
@@ -190,16 +198,22 @@ impl ImageCache {
     /// The best texture to draw `path` at `px` (physical pixels): an exact-size Lanczos copy
     /// when there is one, else the mipmapped texture (and a copy is made in the background).
     pub fn texture_for(&mut self, ctx: &egui::Context, path: &Path, px: egui::Vec2) -> Option<egui::TextureId> {
+        self.texture_blurred(ctx, path, px, 0.0)
+    }
+
+    /// Like `texture_for`, with a Gaussian blur of `sigma` physical pixels applied after resampling.
+    pub fn texture_blurred(&mut self, ctx: &egui::Context, path: &Path, px: egui::Vec2, sigma: f32) -> Option<egui::TextureId> {
         let (w, h) = (px.x.round().max(1.0) as u32, px.y.round().max(1.0) as u32);
+        let blur = (sigma.max(0.0) * 10.0).round() as u32;
         let (base, src) = match self.get(ctx, path) {
             Slot::Ready { tex, src, .. } => (tex.id(), src.clone()),
             _ => return None,
         };
-        // Shown at (or above) the source size: nothing to resample.
-        if w as f32 >= src.width() as f32 * 0.95 || w > MAX_SRC || h > MAX_SRC {
+        // Too big to make a copy of, or (unblurred) shown at or above the source size.
+        if w > MAX_SRC || h > MAX_SRC || (blur == 0 && w >= src.width() && h >= src.height()) {
             return Some(base);
         }
-        let key = (path.to_path_buf(), w, h);
+        let key = (path.to_path_buf(), w, h, blur);
         if let Some(s) = self.sized.get_mut(&key) {
             s.used = self.frame;
             return Some(s.tex.id());
@@ -208,20 +222,21 @@ impl ImageCache {
             self.resampling.insert(path.to_path_buf());
             let tx = self.sized_tx.clone();
             let ctx = ctx.clone();
-            let p = path.to_path_buf();
+            let job = key.clone();
             std::thread::spawn(move || {
-                let out = image::imageops::resize(&*src, w, h, image::imageops::FilterType::Lanczos3);
+                let out = resize_blur_rgba(&src, w, h, blur as f32 / 10.0);
                 let ci = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], out.as_raw());
-                let _ = tx.send((p, w, h, ci));
+                let _ = tx.send((job, ci));
                 ctx.request_repaint();
             });
         }
-        // Meanwhile the closest copy already made for this image, else the mipmapped one.
+        // Meanwhile the closest copy already made for this image (preferring the same blur, and
+        // any blurred one over a sharp one when blurring), else the mipmapped one.
         let near = self
             .sized
             .iter()
-            .filter(|((p, sw, _), _)| p == path && (*sw as i64 - w as i64).abs() < (w as i64 / 4).max(8))
-            .min_by_key(|((_, sw, _), _)| (*sw as i64 - w as i64).abs())
+            .filter(|((p, sw, _, _), _)| p == path && (*sw as i64 - w as i64).abs() < (w as i64 / 4).max(8))
+            .min_by_key(|((_, sw, _, b), _)| ((*b != blur) as u8 + (blur > 0 && *b == 0) as u8, (*sw as i64 - w as i64).abs()))
             .map(|(_, s)| s.tex.id());
         Some(near.unwrap_or(base))
     }
@@ -230,7 +245,7 @@ impl ImageCache {
     pub fn forget(&mut self, path: &Path) {
         self.slots.remove(path);
         self.exists.remove(path);
-        self.sized.retain(|(p, _, _), _| p != path);
+        self.sized.retain(|(p, ..), _| p != path);
     }
 }
 
@@ -238,16 +253,64 @@ fn load(p: &Path) -> Loaded {
     let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
     let img = image::ImageReader::open(p).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?.decode().map_err(|e| e.to_string())?;
     let size = [img.width() as usize, img.height() as usize];
-    let lanczos = image::imageops::FilterType::Lanczos3;
-    let src = if img.width() > MAX_SRC || img.height() > MAX_SRC { img.resize(MAX_SRC, MAX_SRC, lanczos) } else { img };
-    let src = src.to_rgba8();
-    let base = if src.width() > MAX_TEX || src.height() > MAX_TEX {
-        image::DynamicImage::ImageRgba8(src.clone()).resize(MAX_TEX, MAX_TEX, lanczos).to_rgba8()
-    } else {
-        src.clone()
-    };
+    let src = shrink_to(img.to_rgba8(), MAX_SRC);
+    let base = shrink_to(src.clone(), MAX_TEX);
     let ci = ColorImage::from_rgba_unmultiplied([base.width() as usize, base.height() as usize], base.as_raw());
     Ok((ci, size, bytes, Arc::new(src)))
+}
+
+/// Scales `img` down (keeping aspect) so neither side exceeds `max`; unchanged if it already fits.
+fn shrink_to(img: image::RgbaImage, max: u32) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    if w <= max && h <= max {
+        return img;
+    }
+    let k = max as f64 / w.max(h) as f64;
+    resize_rgba(&img, ((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
+}
+
+/// Lanczos resize that respects transparency: filters premultiplied colour, so the (often black)
+/// colour of fully transparent pixels doesn't bleed into soft edges as a dark fringe.
+fn resize_rgba(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
+    resize_blur_rgba(src, w, h, 0.0)
+}
+
+/// `resize_rgba`, then a Gaussian blur of `sigma` pixels (also on premultiplied colour).
+fn resize_blur_rgba(src: &image::RgbaImage, w: u32, h: u32, sigma: f32) -> image::RgbaImage {
+    use image::imageops::{resize, FilterType::Lanczos3};
+    let opaque = src.pixels().all(|p| p[3] == 255);
+    let mut out = if opaque {
+        if (w, h) == src.dimensions() { src.clone() } else { resize(src, w, h, Lanczos3) }
+    } else {
+        let mut pre = src.clone();
+        premultiply(&mut pre);
+        if (w, h) == pre.dimensions() { pre } else { resize(&pre, w, h, Lanczos3) }
+    };
+    if sigma > 0.0 {
+        out = image::imageops::fast_blur(&out, sigma);
+    }
+    if !opaque {
+        unpremultiply(&mut out);
+    }
+    out
+}
+
+fn premultiply(img: &mut image::RgbaImage) {
+    for p in img.pixels_mut() {
+        let a = p[3] as u32;
+        for c in &mut p.0[..3] {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+}
+
+fn unpremultiply(img: &mut image::RgbaImage) {
+    for p in img.pixels_mut() {
+        let a = p[3] as u32;
+        for c in &mut p.0[..3] {
+            *c = if a == 0 { 0 } else { ((*c as u32 * 255 + a / 2) / a).min(255) as u8 };
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -362,5 +425,57 @@ mod save_tests {
         assert_eq!((back.width(), back.height()), (3, 2));
         assert_eq!(back.get_pixel(0, 0).0, [255, 0, 0, 255]);
         let _ = std::fs::remove_file(a);
+    }
+}
+
+#[cfg(test)]
+mod alpha_tests {
+    use super::*;
+
+    #[test]
+    fn transparent_png_keeps_alpha() {
+        // Left half opaque red, right half fully transparent (with black RGB, as most editors save it).
+        let mut img = image::RgbaImage::new(64, 32);
+        for (x, _, p) in img.enumerate_pixels_mut() {
+            p.0 = if x < 32 { [255, 0, 0, 255] } else { [0, 0, 0, 0] };
+        }
+        let dir = std::env::temp_dir().join(format!("ait-alpha-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.png");
+        img.save(&path).unwrap();
+        let (ci, size, _, src) = load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(size, [64, 32]);
+        assert_eq!(src.get_pixel(60, 10).0[3], 0, "transparent pixels stay transparent");
+        assert_eq!(ci.pixels[10 * 64 + 60], egui::Color32::TRANSPARENT);
+        assert_eq!(ci.pixels[10 * 64 + 4], egui::Color32::from_rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn downscale_has_no_dark_fringe() {
+        let mut img = image::RgbaImage::new(64, 64);
+        for (x, _, p) in img.enumerate_pixels_mut() {
+            p.0 = if x < 32 { [255, 255, 255, 255] } else { [0, 0, 0, 0] };
+        }
+        let out = resize_rgba(&img, 16, 16);
+        for p in out.pixels().filter(|p| p[3] > 8) {
+            // Edge pixels are partly transparent but still white, not greyed by the black transparent area.
+            assert!(p[0] > 240 && p[1] > 240 && p[2] > 240, "fringe pixel {:?}", p.0);
+        }
+        assert!(out.pixels().any(|p| p[3] > 0 && p[3] < 255), "edge is soft");
+        assert_eq!(out.get_pixel(15, 8).0[3], 0);
+    }
+
+    #[test]
+    fn blur_keeps_opaque_edges_and_softens() {
+        let mut img = image::RgbaImage::new(40, 40);
+        for (x, _, p) in img.enumerate_pixels_mut() {
+            p.0 = if x < 20 { [255, 255, 255, 255] } else { [0, 0, 0, 255] };
+        }
+        let out = resize_blur_rgba(&img, 40, 40, 4.0);
+        assert!(out.pixels().all(|p| p[3] == 255), "an opaque image stays opaque up to its borders");
+        let mid = out.get_pixel(20, 20)[0];
+        assert!(mid > 60 && mid < 200, "the hard edge is softened ({mid})");
+        assert!(out.get_pixel(0, 0)[0] > 240, "a border pixel isn't darkened");
     }
 }

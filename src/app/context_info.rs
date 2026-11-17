@@ -69,23 +69,6 @@ fn run_context(program: String, pre: Vec<String>, cwd: PathBuf, agent_id: String
     }
 }
 
-/// Splits the `/context` report after its first table (the usage by category): the overview
-/// goes on the left, the following sections (memory files, skills, …) on the right.
-fn split_report(md: &str) -> (&str, &str) {
-    let mut seen_table = false;
-    let mut pos = 0;
-    for line in md.split_inclusive('\n') {
-        let t = line.trim_start();
-        if t.starts_with('|') {
-            seen_table = true;
-        } else if seen_table && t.starts_with('#') {
-            return (&md[..pos], &md[pos..]);
-        }
-        pos += line.len();
-    }
-    (md, "")
-}
-
 /// Draws the `/context` markdown: headings, `**bold**` runs, and tables as grids.
 fn show_markdown(ui: &mut Ui, md: &str) {
     let lines: Vec<&str> = md.lines().collect();
@@ -181,8 +164,7 @@ impl App {
         let mut refresh = false;
         let m = egui::Modal::new(egui::Id::unique("context_info")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(20)).show(ctx, |ui| {
             let screen = ctx.content_rect();
-            let two_columns = matches!(report, Some(Ok(_)));
-            ui.set_width(if two_columns { (screen.width() - 120.0).clamp(620.0, 1300.0) } else { 620.0 });
+            ui.set_width(760.0_f32.min(screen.width() - 80.0));
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Context").size(18.0).family(bold()).color(Color32::WHITE));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -194,58 +176,39 @@ impl App {
             ui.add_space(2.0);
             ui.label(RichText::new(&name).family(bold()).color(TEXT));
             ui.add_space(10.0);
-            let max_h = (screen.height() - 260.0).max(200.0);
-            let usage = |ui: &mut Ui| {
-                if let Some(t) = &text {
-                    ui.add_space(8.0);
-                    egui::CollapsingHeader::new(RichText::new("Usage and tokens").color(TEXT)).id_salt("context_usage").show(ui, |ui| {
-                        ui.label(RichText::new(t).color(TEXT_DIM));
-                    });
-                }
-            };
-            match &report {
-                // The overview and the categories on the left; the rest (memory files,
-                // skills, …) beside them.
-                Some(Ok(md)) if can_report => {
-                    let (left, right) = split_report(md);
-                    ui.horizontal_top(|ui| {
-                        ui.vertical(|ui| {
-                            egui::ScrollArea::vertical().id_salt("context_left").max_height(max_h).show(ui, |ui| {
-                                show_markdown(ui, left);
-                                usage(ui);
-                            });
-                        });
-                        if !right.trim().is_empty() {
-                            ui.add_space(28.0);
-                            ui.vertical(|ui| {
-                                egui::ScrollArea::both().id_salt("context_right").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| show_markdown(ui, right));
-                            });
-                        }
-                    });
-                }
-                _ => {
-                    egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
-                        if can_report {
-                            match &report {
-                                None => {
-                                    ui.horizontal(|ui| {
-                                        ui.spinner();
-                                        ui.label(RichText::new("Running /context…").color(TEXT_DIM));
-                                    });
-                                }
-                                Some(Err(e)) => {
-                                    ui.label(RichText::new("Couldn't get the /context report:").color(ORANGE));
-                                    ui.label(RichText::new(e).size(12.0).color(TEXT_DIM));
-                                }
-                                Some(Ok(_)) => {}
+            let max_h = (screen.height() - 300.0).clamp(160.0, 480.0);
+            // A solid scroll bar that takes its own space: the app's floating ones are drawn
+            // over the content, on top of the table's last column.
+            ui.scope(|ui| {
+                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                egui::ScrollArea::both().max_height(max_h).auto_shrink([false, true]).show_hinted(ui, |ui| {
+                    if can_report {
+                        match &report {
+                            None => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(RichText::new("Running /context…").color(TEXT_DIM));
+                                });
                             }
-                            usage(ui);
-                        } else if let Some(t) = &text {
-                            ui.label(RichText::new(t).color(TEXT_DIM));
+                            Some(Ok(md)) => show_markdown(ui, md),
+                            Some(Err(e)) => {
+                                ui.label(RichText::new("Couldn't get the /context report:").color(ORANGE));
+                                ui.label(RichText::new(e).size(12.0).color(TEXT_DIM));
+                            }
                         }
-                    });
-                }
-            }
+                        if let Some(t) = &text {
+                            ui.add_space(8.0);
+                            egui::CollapsingHeader::new(RichText::new("Usage and tokens").color(TEXT)).id_salt("context_usage").show(ui, |ui| {
+                                ui.label(RichText::new(t).color(TEXT_DIM));
+                            });
+                        }
+                    } else if let Some(t) = &text {
+                        ui.label(RichText::new(t).color(TEXT_DIM));
+                    }
+                    // Keeps the last column clear of the scroll bar's edge.
+                    ui.add_space(4.0);
+                });
+            });
             ui.add_space(10.0);
             ui.label(RichText::new("Compact replaces the conversation so far with a summary, so each request sends less context.").size(12.0).color(TEXT_FAINT));
             if busy && can_compact {
@@ -273,17 +236,5 @@ impl App {
                 info.asked = false;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn report_splits_after_the_category_table() {
-        let md = "## Context Usage\n\n**Tokens:** 1k\n\n### Estimated usage by category\n\n| Category | Tokens |\n|---|---|\n| Messages | 10 |\n\n### Memory Files\n\n| Type | Path |\n|---|---|\n| AutoMem | x |\n";
-        let (l, r) = super::split_report(md);
-        assert!(l.contains("Estimated usage") && l.contains("Messages") && !l.contains("Memory Files"));
-        assert!(r.starts_with("### Memory Files"));
-        assert_eq!(super::split_report("## Only\n| a |\n"), ("## Only\n| a |\n", ""));
     }
 }

@@ -13,6 +13,7 @@ impl App {
         let mut select: Option<Option<PathBuf>> = None;
         let mut remove: Option<PathBuf> = None;
         let mut hide: Option<PathBuf> = None;
+        let mut set_accent: Option<(PathBuf, Option<[u8; 3]>)> = None;
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             // Home.
@@ -70,8 +71,25 @@ impl App {
                     self.drag_project = Some(proj.path.clone());
                 }
                 let p = ui.painter();
-                if resp.hovered() && !sel {
-                    p.rect_filled(tr.shrink2(Vec2::new(2.0, 6.0)), 5.0, CARD);
+                let accent = proj.accent_color();
+                match accent {
+                    // An accented tab: a glow rising from the bottom edge (stronger when hovered
+                    // or selected) and a short accent bar under the name.
+                    Some(a) => {
+                        let strength = if sel { 0.30 } else if resp.hovered() { 0.22 } else { 0.11 };
+                        let glow = egui::Rect::from_min_max(egui::pos2(tr.left() + 3.0, bar.top() + 4.0), egui::pos2(tr.right() - 3.0, bar.bottom()));
+                        widgets::paint_glow_up(p, glow, a.gamma_multiply(strength));
+                        if !sel {
+                            let bw = (tr.width() * 0.35).min(28.0);
+                            let by = bar.bottom() - 1.5;
+                            p.line_segment([egui::pos2(tr.center().x - bw / 2.0, by), egui::pos2(tr.center().x + bw / 2.0, by)], Stroke::new(2.0, a.gamma_multiply(if resp.hovered() { 0.9 } else { 0.55 })));
+                        }
+                    }
+                    None => {
+                        if resp.hovered() && !sel {
+                            p.rect_filled(tr.shrink2(Vec2::new(2.0, 6.0)), 5.0, CARD);
+                        }
+                    }
                 }
                 let mut tx = tr.left() + 16.0;
                 if let Some(c) = dot {
@@ -97,7 +115,11 @@ impl App {
                     hide = Some(proj.path.clone());
                 }
                 if sel {
-                    p.line_segment([egui::pos2(tr.left() + 8.0, bar.bottom() - 1.0), egui::pos2(tr.right() - 8.0, bar.bottom() - 1.0)], Stroke::new(2.0, ACCENT_HI));
+                    let (x0, x1) = match accent {
+                        Some(_) => (tr.left() + 3.0, tr.right() - 3.0),
+                        None => (tr.left() + 8.0, tr.right() - 8.0),
+                    };
+                    p.line_segment([egui::pos2(x0, bar.bottom() - 1.0), egui::pos2(x1, bar.bottom() - 1.0)], Stroke::new(if accent.is_some() { 2.5 } else { 2.0 }, accent.unwrap_or(ACCENT_HI)));
                 }
                 if resp.clicked() {
                     select = Some(Some(proj.path.clone()));
@@ -124,6 +146,12 @@ impl App {
                         self.renaming_project = Some((proj.path.clone(), proj.name.clone()));
                         ui.close();
                     }
+                    let cfg = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                    egui::containers::menu::SubMenuButton::new("Accent colour").config(cfg).ui(ui, |ui| {
+                        if let Some(c) = widgets::accent_picker(ui, proj.accent) {
+                            set_accent = Some((proj.path.clone(), c));
+                        }
+                    });
                     if ui.button("Open in Explorer").clicked() {
                         let _ = std::process::Command::new("explorer.exe").arg(&proj.path).spawn();
                         ui.close();
@@ -174,7 +202,11 @@ impl App {
                 let resp = resp.on_hover_text(format!("{} more project{}", overflow.len(), if overflow.len() == 1 { "" } else { "s" }));
                 egui::Popup::menu(&resp).show(|ui| {
                     for proj in &overflow {
-                        if ui.button(&proj.name).clicked() {
+                        let label = match proj.accent_color() {
+                            Some(a) => RichText::new(format!("●  {}", proj.name)).color(a),
+                            None => RichText::new(&proj.name),
+                        };
+                        if ui.button(label).clicked() {
                             select = Some(Some(proj.path.clone()));
                             ui.close();
                         }
@@ -221,6 +253,9 @@ impl App {
         }
         if let Some(p) = hide {
             self.hide_project_tab(&p);
+        }
+        if let Some((p, c)) = set_accent {
+            self.set_project_accent(&p, c);
         }
         if let Some(p) = remove {
             self.confirm_remove_project = Some(p);
@@ -355,17 +390,17 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some(url) = &github {
-                    if widgets::icon_button(ui, Icon::GitHub, 26.0, TEXT_DIM, &format!("Open on GitHub: {url}")).clicked() {
-                        crate::links::open_url(url);
-                    }
-                }
                 if ui.button("Scripts").on_hover_text("Run a script from the scripts folder in this project, as its own session (Ctrl+Shift+R)").clicked() {
                     self.open_scripts();
                 }
                 if ui.button("Snippets").on_hover_text("Insert a saved prompt (Ctrl+Shift+S)").clicked() {
                     self.snippets_open = true;
                     self.snippet_focus = true;
+                }
+                if let Some(url) = &github {
+                    if widgets::icon_button(ui, Icon::GitHub, 26.0, TEXT_DIM, &format!("Open on GitHub: {url}")).clicked() {
+                        crate::links::open_url(url);
+                    }
                 }
                 ui.add_space(6.0);
                 if !self.s.show_image_strip || list.is_empty() {

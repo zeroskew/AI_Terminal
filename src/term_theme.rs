@@ -16,9 +16,47 @@ pub struct TermTheme {
     pub selection: Rgb,
     /// Black, Red, Green, Yellow, Blue, Magenta, Cyan, White, then the bright eight.
     pub ansi: [Rgb; 16],
-    /// Drawn under the text (cover-fit), at `bg_opacity`.
+    /// Master switch for the background image (keeps the path etc. when off).
+    pub bg_image_enabled: bool,
+    /// Drawn under the text, laid out per `bg_fit`, at `bg_opacity`.
     pub bg_image: Option<PathBuf>,
     pub bg_opacity: f32,
+    pub bg_fit: BgFit,
+    /// Gaussian blur of the image, in (logical) pixels; 0 = sharp.
+    pub bg_blur: f32,
+    /// While the image is shown, use `bg_color` instead of `background` behind it.
+    pub bg_color_override: bool,
+    pub bg_color: Rgb,
+}
+
+/// How the background image is laid out in the terminal pane.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+pub enum BgFit {
+    /// Scale to cover the whole pane, cropping the overflow (keeps aspect).
+    #[default]
+    Fill,
+    /// Scale to fit inside the pane, leaving bars (keeps aspect).
+    Fit,
+    /// Stretch to the pane's exact size (ignores aspect).
+    Stretch,
+    /// Repeat at actual size from the top-left corner.
+    Tile,
+    /// Actual size, centred.
+    Center,
+}
+
+impl BgFit {
+    pub const ALL: [BgFit; 5] = [BgFit::Fill, BgFit::Fit, BgFit::Stretch, BgFit::Tile, BgFit::Center];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BgFit::Fill => "Fill (crop to cover)",
+            BgFit::Fit => "Fit (show whole image)",
+            BgFit::Stretch => "Stretch",
+            BgFit::Tile => "Tile",
+            BgFit::Center => "Center (actual size)",
+        }
+    }
 }
 
 pub const COLOR_NAMES: [&str; 16] = [
@@ -31,7 +69,7 @@ const fn hex(v: u32) -> Rgb {
 }
 
 fn scheme(bg: u32, fg: u32, cursor: u32, sel: u32, ansi: [u32; 16]) -> TermTheme {
-    TermTheme { background: hex(bg), foreground: hex(fg), cursor: hex(cursor), selection: hex(sel), ansi: ansi.map(hex), bg_image: None, bg_opacity: 0.5 }
+    TermTheme { background: hex(bg), foreground: hex(fg), cursor: hex(cursor), selection: hex(sel), ansi: ansi.map(hex), bg_image_enabled: true, bg_image: None, bg_opacity: 0.5, bg_fit: BgFit::Fill, bg_blur: 0.0, bg_color_override: false, bg_color: hex(bg) }
 }
 
 impl Default for TermTheme {
@@ -130,10 +168,30 @@ pub struct Palette {
 
 impl TermTheme {
     pub fn palette(&self) -> Palette {
-        Palette { bg: c(self.background), fg: c(self.foreground), cursor: c(self.cursor), selection: c(self.selection), ansi: self.ansi.map(c) }
+        Palette { bg: c(self.effective_background()), fg: c(self.foreground), cursor: c(self.cursor), selection: c(self.selection), ansi: self.ansi.map(c) }
     }
 
-    /// Same colours as `other` (ignores the background image).
+    /// The image to draw, if the image is switched on and set.
+    pub fn active_bg_image(&self) -> Option<&PathBuf> {
+        self.bg_image.as_ref().filter(|_| self.bg_image_enabled)
+    }
+
+    /// The terminal background: the image's override colour while an image is active, else `background`.
+    pub fn effective_background(&self) -> Rgb {
+        if self.bg_color_override && self.active_bg_image().is_some() { self.bg_color } else { self.background }
+    }
+
+    /// Copies the background-image settings (image, opacity, layout) from `other`.
+    pub fn keep_background_of(&mut self, other: &TermTheme) {
+        self.bg_image = other.bg_image.clone();
+        self.bg_opacity = other.bg_opacity;
+        self.bg_fit = other.bg_fit;
+        self.bg_blur = other.bg_blur;
+        self.bg_image_enabled = other.bg_image_enabled;
+        self.bg_color_override = other.bg_color_override;
+        self.bg_color = other.bg_color;
+    }
+
     pub fn same_colors(&self, other: &TermTheme) -> bool {
         self.background == other.background && self.foreground == other.foreground && self.cursor == other.cursor && self.selection == other.selection && self.ansi == other.ansi
     }

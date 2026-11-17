@@ -10,6 +10,8 @@ impl App {
         let mut set_tab: Option<(PathBuf, bool)> = None;
         let mut remove: Option<PathBuf> = None;
         let mut rename: Option<PathBuf> = None;
+        let mut set_accent: Option<(PathBuf, Option<[u8; 3]>)> = None;
+        let mut swatch_clicked = false;
         let tab_order = self.tab_projects();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
             ui.add_space(24.0);
@@ -41,9 +43,30 @@ impl App {
                             let unseen = self.tabs.iter().any(|t| t.project == proj.path && t.sess.unseen);
                             let (rect, resp) = ui.allocate_exact_size(Vec2::new(card_w, 108.0), Sense::click());
                             let p = ui.painter();
+                            let accent = proj.accent_color();
                             p.rect_filled(rect, 8.0, if resp.hovered() { CARD_HI } else { CARD });
-                            p.rect_stroke(rect, 8.0, Stroke::new(1.0, if resp.hovered() { ACCENT } else { BORDER }), egui::StrokeKind::Inside);
-                            widgets::paint_icon(p, Icon::Folder, egui::pos2(rect.left() + 22.0, rect.top() + 24.0), 16.0, Color32::from_rgb(222, 184, 92));
+                            if let Some(a) = accent {
+                                // A soft wash from the top and an accent edge on the left, clipped to the card.
+                                let head = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 48.0));
+                                let mut mesh = egui::Mesh::default();
+                                let c = a.gamma_multiply(if resp.hovered() { 0.16 } else { 0.10 });
+                                mesh.colored_vertex(head.left_top(), c);
+                                mesh.colored_vertex(head.right_top(), c);
+                                mesh.colored_vertex(head.left_bottom(), Color32::TRANSPARENT);
+                                mesh.colored_vertex(head.right_bottom(), Color32::TRANSPARENT);
+                                mesh.add_triangle(0, 1, 2);
+                                mesh.add_triangle(1, 3, 2);
+                                p.with_clip_rect(rect.shrink(1.0)).add(egui::Shape::mesh(mesh));
+                                let edge = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 3.5, rect.bottom()));
+                                p.rect_filled(edge, egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, a);
+                            }
+                            let border = match (resp.hovered(), accent) {
+                                (true, Some(a)) => a,
+                                (true, None) => ACCENT,
+                                _ => BORDER,
+                            };
+                            p.rect_stroke(rect, 8.0, Stroke::new(1.0, border), egui::StrokeKind::Inside);
+                            widgets::paint_icon(p, Icon::Folder, egui::pos2(rect.left() + 22.0, rect.top() + 24.0), 16.0, accent.unwrap_or(Color32::from_rgb(222, 184, 92)));
                             p.text(egui::pos2(rect.left() + 40.0, rect.top() + 24.0), egui::Align2::LEFT_CENTER, &proj.name, egui::FontId::new(15.0, bold()), TEXT);
                             let mut job = egui::text::LayoutJob::simple_singleline(proj.path.display().to_string(), egui::FontId::proportional(12.0), TEXT_FAINT);
                             job.wrap.max_width = card_w - 32.0;
@@ -86,6 +109,24 @@ impl App {
                                     set_tab = Some((proj.path.clone(), shown));
                                 }
                             }
+                            // Accent swatch, bottom-left: opens the colour picker.
+                            let sr = egui::Rect::from_center_size(egui::pos2(rect.left() + 24.0, ctl.center().y), Vec2::splat(22.0));
+                            let sresp = ui.interact(sr, egui::Id::unique(("project_accent", &proj.path)), Sense::click());
+                            if sresp.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                ui.painter().rect_filled(sr, 5.0, CARD_HI.gamma_multiply(1.3));
+                            }
+                            widgets::paint_swatch(ui.painter(), sr.center(), 6.5, accent, false, sresp.hovered());
+                            let sresp = sresp.on_hover_text(if accent.is_some() { "Accent colour (tints this project's tab)" } else { "Set an accent colour for this project's tab" });
+                            egui::Popup::menu(&sresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                                ui.set_min_width(170.0);
+                                if let Some(c) = widgets::accent_picker(ui, proj.accent) {
+                                    set_accent = Some((proj.path.clone(), c));
+                                }
+                            });
+                            if sresp.clicked() {
+                                swatch_clicked = true;
+                            }
                             if resp.clicked() {
                                 open = Some(proj.path.clone());
                             }
@@ -105,7 +146,10 @@ impl App {
                 });
             });
         });
-        let toggled = set_tab.is_some();
+        let toggled = set_tab.is_some() || swatch_clicked || set_accent.is_some();
+        if let Some((p, c)) = set_accent {
+            self.set_project_accent(&p, c);
+        }
         if let Some((p, show)) = set_tab {
             if show {
                 if let Some(x) = self.s.projects.iter_mut().find(|x| x.path == p) {

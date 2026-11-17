@@ -92,15 +92,12 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
     let id = ui.scope_id().with(("terminal", s.id));
     let resp = ui.interact(full, id, Sense::click_and_drag());
     ui.painter().rect_filled(full, 0.0, term_bg);
-    // Optional background image, cover-fit, at the chosen opacity.
-    if let Some(img) = opt.theme.bg_image.as_ref().filter(|p| cache.exists(p)) {
-        if let Slot::Ready { tex, size, .. } = cache.get(ui.ctx(), img) {
-            let (iw, ih) = (size[0] as f32, size[1] as f32);
-            let (k_w, k_h) = (full.width() / iw, full.height() / ih);
-            let k = k_w.max(k_h);
-            let (uw, uh) = (full.width() / (iw * k), full.height() / (ih * k));
-            let uv = Rect::from_min_max(Pos2::new((1.0 - uw) / 2.0, (1.0 - uh) / 2.0), Pos2::new((1.0 + uw) / 2.0, (1.0 + uh) / 2.0));
-            ui.painter().image(tex.id(), full, uv, Color32::from_white_alpha((opt.theme.bg_opacity.clamp(0.0, 1.0) * 255.0) as u8));
+    // Optional background image, laid out per the chosen fit, at the chosen opacity.
+    if let Some(img) = opt.theme.active_bg_image().filter(|p| cache.exists(p)) {
+        if let Slot::Ready { size, .. } = cache.get(ui.ctx(), img) {
+            let size = *size;
+            let tint = Color32::from_white_alpha((opt.theme.bg_opacity.clamp(0.0, 1.0) * 255.0) as u8);
+            paint_bg_image(&ui.painter().with_clip_rect(full), cache, img, size, full, opt.theme.bg_fit, opt.theme.bg_blur, tint);
         }
     }
     if want_focus || resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
@@ -344,7 +341,6 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
         let cursor = (cvr >= 0 && (cvr as usize) < rows && cur.shape != CursorShape::Hidden).then_some((cvr as usize, cur.point.column.0, cur.shape));
         (grid, wrapped, cursor, content.display_offset, t.grid().history_size())
     };
-    let _ = s.dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
 
     // Colour tags in the agent's text ({green}OK{/}); not on the row being typed.
     if opt.color_tags {
@@ -823,6 +819,59 @@ impl Search {
     pub fn open(&mut self) {
         self.open = true;
         self.focus = true;
+    }
+}
+
+/// Paints the terminal background image into `full` (the painter clips to it).
+/// `size` is the image's pixel size; "actual size" means one image pixel per screen pixel.
+/// Each copy is drawn from a texture resampled (Lanczos) to its exact on-screen pixel size and
+/// placed on whole physical pixels, so downscaled images stay sharp; the painter clips to `full`.
+fn paint_bg_image(p: &egui::Painter, cache: &mut ImageCache, path: &std::path::Path, size: [usize; 2], full: Rect, fit: crate::term_theme::BgFit, blur: f32, tint: Color32) {
+    use crate::term_theme::BgFit;
+    let ctx = p.ctx().clone();
+    let ppp = ctx.pixels_per_point();
+    let (iw, ih) = (size[0].max(1) as f32, size[1].max(1) as f32);
+    let whole = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    // Rounds a rect to whole physical pixels (keeping its size in pixels).
+    let snap = |r: Rect| -> Rect {
+        let min = (r.min.to_vec2() * ppp).round() / ppp;
+        let sz = (r.size() * ppp).round().max(Vec2::splat(1.0)) / ppp;
+        Rect::from_min_size(min.to_pos2(), sz)
+    };
+    let mut draw = |r: Rect| {
+        // Copies are capped at MAX_SRC a side (a Fill of an odd-shaped image can be bigger): then
+        // use the biggest allowed copy, blurred proportionally, stretched over `r`.
+        let px = r.size() * ppp;
+        let f = (crate::images::MAX_SRC as f32 / px.max_elem()).min(1.0);
+        if let Some(tex) = cache.texture_blurred(&ctx, path, (px * f).floor(), blur * ppp * f) {
+            p.image(tex, r, whole, tint);
+        }
+    };
+    match fit {
+        // Scaled to cover the pane; the overflow is clipped.
+        BgFit::Fill => {
+            let k = (full.width() / iw).max(full.height() / ih);
+            draw(snap(Rect::from_center_size(full.center(), Vec2::new(iw * k, ih * k))));
+        }
+        BgFit::Fit => {
+            let k = (full.width() / iw).min(full.height() / ih);
+            draw(snap(Rect::from_center_size(full.center(), Vec2::new(iw * k, ih * k))));
+        }
+        BgFit::Stretch => draw(snap(full)),
+        BgFit::Center => draw(snap(Rect::from_center_size(full.center(), Vec2::new(iw, ih) / ppp))),
+        BgFit::Tile => {
+            // Actual size, but never more than ~64 tiles per axis (tiny images get scaled up).
+            let mut tile = Vec2::new(iw, ih) / ppp;
+            let k = (full.width() / (tile.x * 64.0)).max(full.height() / (tile.y * 64.0)).max(1.0);
+            tile = (tile * k * ppp).round().max(Vec2::splat(1.0)) / ppp;
+            let origin = snap(Rect::from_min_size(full.min, tile)).min;
+            let (nx, ny) = ((full.width() / tile.x).ceil() as usize, (full.height() / tile.y).ceil() as usize);
+            for y in 0..ny {
+                for x in 0..nx {
+                    draw(Rect::from_min_size(origin + Vec2::new(x as f32 * tile.x, y as f32 * tile.y), tile));
+                }
+            }
+        }
     }
 }
 

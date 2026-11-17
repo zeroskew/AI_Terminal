@@ -46,6 +46,15 @@ pub struct Project {
     /// clears this (the project, its sessions and its settings stay).
     #[serde(default = "yes")]
     pub in_tabs: bool,
+    /// Optional accent colour (sRGB) that tints the project's tab and its Home card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<[u8; 3]>,
+}
+
+impl Project {
+    pub fn accent_color(&self) -> Option<Color32> {
+        self.accent.map(widgets::accent_color)
+    }
 }
 
 fn yes() -> bool {
@@ -78,8 +87,8 @@ pub struct SavedSession {
     /// Moved to the Archived group (hidden from the list until expanded).
     #[serde(default)]
     pub archived: bool,
-    /// Unix seconds when it last ran here (0 = unknown: `created` is used). Decides which
-    /// sessions the "keep the last N" limit archives.
+    /// Unix seconds when it was last used (a line submitted; 0 = unknown: `created` is used).
+    /// Orders the sidebar and decides which sessions the "keep the last N" limit archives.
     #[serde(default)]
     pub used: u64,
 }
@@ -110,7 +119,8 @@ struct Row {
     live: bool,
     name: String,
     profile: Profile,
-    created: u64,
+    /// Last used (else created), Unix seconds: the order and the day group.
+    used: u64,
     exited: Option<i32>,
     unseen: bool,
     images: usize,
@@ -257,6 +267,8 @@ pub struct Settings {
     pub name_sessions: bool,
     // Options > General.
     pub launch_on_startup: bool,
+    /// Launching the app again brings the running one to the front instead of opening another.
+    pub single_instance: bool,
     pub minimize_to_tray: bool,
     /// What closing the window does: "exit", "minimize" (to the taskbar) or "tray" (hide it;
     /// the tray icon brings it back). Quit from the tray always exits.
@@ -299,11 +311,10 @@ pub struct Settings {
     pub search_days: u32,
     /// Check GitHub for a new release now and then, download it, and install it at the next restart.
     pub auto_update: bool,
-    /// When automatic checks run: shortly after start-up, and/or every `update_interval_min`
-    /// minutes (at least 1).
+    /// When automatic checks run: shortly after start-up, and/or twice a day (every 12 hours from
+    /// start-up).
     pub update_on_startup: bool,
     pub update_periodic: bool,
-    pub update_interval_min: u32,
     /// Settings format: 4 = current profile names, Claude the default session type. Missing in older
     /// files, so it reads as 0 there (not the struct default).
     #[serde(default)]
@@ -349,6 +360,7 @@ impl Default for Settings {
             color_tag_prompt: true,
             name_sessions: true,
             launch_on_startup: false,
+            single_instance: true,
             minimize_to_tray: false,
             close_action: "exit".into(),
             notifications: true,
@@ -375,7 +387,6 @@ impl Default for Settings {
             auto_update: true,
             update_on_startup: true,
             update_periodic: false,
-            update_interval_min: 480,
             snippets: vec![
                 Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
                 Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
@@ -523,6 +534,8 @@ pub struct App {
     focus_terminal: bool,
     applied: (String, f32),
     options: Option<OptPage>,
+    /// How far the Options window has been dragged from the screen centre.
+    options_offset: Vec2,
     /// Options > Shortcuts is recording a new binding for this command.
     capturing: Option<keys::Cmd>,
     plugins: Option<PluginsUi>,
@@ -621,6 +634,8 @@ fn project_name(p: &Path) -> String {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext) -> Self {
+        // The window exists but is still hidden: darken its title bar before it is first shown.
+        crate::titlebar::apply();
         let mut s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
         install_fonts(&cc.egui_ctx, &s.code_font);
         apply_style(&cc.egui_ctx, s.ui_size);
@@ -665,7 +680,7 @@ impl App {
         crate::hooks::watch(cc.egui_ctx.clone());
         if s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true });
+            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None });
         }
         images::cleanup_async(s.paste_keep_days, s.paste_limit_bytes());
         let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
@@ -696,6 +711,7 @@ impl App {
             focus_terminal: true,
             applied,
             options: None,
+            options_offset: Vec2::ZERO,
             capturing: None,
             plugins: None,
             mcp_servers: None,
@@ -785,6 +801,10 @@ impl App {
                     Some(p) => ss.profile = p.clone(),
                     None => continue,
                 }
+                // A session saved before its first message (older versions did): nothing to resume.
+                if !agents::conversation_exists(ss.profile.kind, &ss.project, ss.agent_id.as_deref()) {
+                    continue;
+                }
                 if let Some(id) = &ss.agent_id {
                     let t = match ss.profile.kind {
                         Kind::Claude => agents::claude_title(&ss.project, id),
@@ -821,7 +841,7 @@ impl App {
             if w[0] == "--add-project" {
                 let dir = PathBuf::from(&w[1]);
                 if !app.s.projects.iter().any(|p| p.path == dir) {
-                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true });
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None });
                 }
                 app.s.selected_project = Some(dir);
             }
@@ -1021,6 +1041,7 @@ impl App {
             self.dormant.remove(i);
             if let Some(t) = self.tabs.last_mut() {
                 t.pin = ss.pin;
+                t.sess.used = ss.used;
                 // Keep the old title until the program sets a new one.
                 if t.sess.title.is_none() {
                     t.sess.title = ss.title;
@@ -1041,6 +1062,7 @@ impl App {
         let tt = self.tabs[i].sess.transcript_title.clone();
         let (project, profile, name, created) = (self.tabs[i].project.clone(), self.tabs[i].sess.profile.clone(), self.tabs[i].sess.name.clone(), self.tabs[i].created);
         let pin = self.tabs[i].pin;
+        let used = self.tabs[i].sess.used;
         let new_id = self.next_id;
         self.next_id += 1;
         let resume = self.tabs[i].sess.agent_id.clone();
@@ -1048,6 +1070,7 @@ impl App {
             Ok(mut sess) => {
                 sess.pasted_images = pasted;
                 sess.transcript_title = tt;
+                sess.used = used;
                 self.tabs[i] = Tab { project, created, pin, sess, view: ViewState::default(), bell: false };
                 self.select_session(new_id);
             }
@@ -1244,7 +1267,7 @@ impl App {
             cost: t.sess.cost.map(|c| c.usd),
             pin: t.pin,
             archived: false,
-            used: now_secs(),
+            used: t.sess.used.max(t.created),
         };
         crate::dlog!("auto-close #{id} ({why}): {}", t.sess.display_name());
         let nid = self.next_id;
@@ -1263,6 +1286,7 @@ impl App {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true)) && winsys::is_main_visible();
         self.auto_archive();
 
+        winsys::set_single_instance(ctx, self.s.single_instance);
         // Tray: needed for minimize / close to tray and for notifications.
         let tray_window = self.s.minimize_to_tray || self.s.close_action == "tray";
         if tray_window || self.s.notifications {
@@ -1399,7 +1423,7 @@ impl App {
         // Session management: idle timeout and memory threshold (every 15 s).
         if self.last_manage.elapsed() >= Duration::from_secs(15) {
             self.last_manage = std::time::Instant::now();
-            let manageable = |t: &Tab, active: Option<u64>| t.sess.profile.is_agent() && t.sess.agent_id.is_some() && t.sess.exited.is_none() && !t.sess.busy && active != Some(t.sess.id);
+            let manageable = |t: &Tab, active: Option<u64>| t.sess.profile.is_agent() && agents::conversation_exists(t.sess.profile.kind, &t.sess.cwd, t.sess.agent_id.as_deref()) && t.sess.exited.is_none() && !t.sess.busy && active != Some(t.sess.id);
             if self.s.idle_close_minutes > 0 {
                 let limit = Duration::from_secs(self.s.idle_close_minutes as u64 * 60);
                 let ids: Vec<u64> = self.tabs.iter().filter(|t| manageable(t, self.active) && t.sess.idle_for() >= limit).map(|t| t.sess.id).collect();
@@ -1423,7 +1447,7 @@ impl App {
     fn add_project(&mut self, ctx: &egui::Context) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Add project folder").pick_folder() {
             if !self.s.projects.iter().any(|p| p.path == dir) {
-                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true });
+                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None });
             }
             let _ = ctx;
             self.select_project(Some(dir));
@@ -1435,6 +1459,8 @@ impl App {
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.s.sessions = self.sidebar_order().iter().filter_map(|id| self.tabs.iter().find(|t| t.sess.id == *id)).filter(|t| t.sess.profile.kind.tracks_conversation())
+            // Sessions never used have nothing to resume: they aren't listed next time.
+            .filter(|t| agents::conversation_exists(t.sess.profile.kind, &t.sess.cwd, t.sess.agent_id.as_deref()))
             .map(|t| SavedSession {
                 project: t.project.clone(),
                 profile: t.sess.profile.clone(),
@@ -1446,7 +1472,7 @@ impl eframe::App for App {
                 cost: t.sess.cost.map(|c| c.usd),
                 pin: t.pin,
                 archived: false,
-                used: now_secs(),
+                used: t.sess.used.max(t.created),
             })
             .collect();
         // Listed sessions that weren't started this time stay in the list.
@@ -1480,14 +1506,25 @@ impl eframe::App for App {
                 ctx.copy_text(clip);
             }
             t.bell |= bell;
-            if Some(t.sess.id) != active && t.sess.dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                t.sess.unseen = true;
-            }
+            // Only a change to the screen's text counts as unseen output: Claude repaints and
+            // retitles itself without saying anything new.
+            let changed = t.sess.dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
             if Some(t.sess.id) == active {
+                // Also on arriving at a session that changed while away (its `seen_hash` is stale).
+                if changed || t.sess.unseen {
+                    t.sess.seen_hash = t.sess.screen_hash();
+                }
                 t.sess.unseen = false;
+            } else if changed && t.sess.screen_hash() != t.sess.seen_hash {
+                t.sess.unseen = true;
             }
         }
         self.mcp_pump(&ctx);
+        // egui hears of window focus only from Windows' focus messages; if it never had it, make
+        // sure the keyboard really comes to us while the window is in front.
+        if !ctx.input(|i| i.focused) && winsys::claim_keyboard_focus() {
+            ctx.request_repaint();
+        }
         if crate::dlog::ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
             // Focus diagnostics: where a click lands, and who held the keyboard before it.
             let (click, pos, win_focused) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.interact_pos(), i.focused));
@@ -1532,7 +1569,7 @@ impl eframe::App for App {
         }
 
         let mut actions = Vec::new();
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(term_theme::c(self.s.term_theme.background))).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(term_theme::c(self.s.term_theme.effective_background()))).show(ui, |ui| {
             let theme = self.s.term_theme.clone();
             let opt = ViewOptions { font_size: self.s.font_size, theme: &theme, inline_previews: self.s.inline_previews, preview_max_px: self.s.preview_max_px, preview_over_text: self.s.preview_over_text, shift_enter_alt: self.s.shift_enter_alt, color_tags: self.s.color_tags };
             let focus = std::mem::take(&mut self.focus_terminal) && !modal_open && self.renaming.is_none() && self.renaming_project.is_none();

@@ -18,12 +18,15 @@ const REPO: &str = "zeroskew/AI_Terminal";
 const RELAUNCHER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/relauncher.exe"));
 /// The start-up check runs this long after start-up (the app settles first).
 const FIRST_CHECK: Duration = Duration::from_secs(20);
+/// The periodic check ("twice a day") runs this often, counted from start-up, then from the last
+/// automatic check.
+const PERIODIC_CHECK: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// When automatic checks run (Options > General > Updates).
 pub struct Schedule {
     pub on_startup: bool,
-    /// Every this many minutes (counted from start-up, then from the last automatic check).
-    pub every_min: Option<u32>,
+    /// Twice a day: every PERIODIC_CHECK.
+    pub periodic: bool,
 }
 
 #[derive(Clone, PartialEq)]
@@ -57,7 +60,7 @@ fn set(s: Status) {
     *STATUS.lock().unwrap() = s;
 }
 
-fn test_instance() -> bool {
+pub fn test_instance() -> bool {
     std::env::args().any(|a| a == "--test-instance")
 }
 
@@ -119,7 +122,7 @@ pub fn auto_check(ctx: &egui::Context, enabled: bool, schedule: &Schedule) {
     if !enabled || is_dev_build() || BUSY.load(Ordering::Relaxed) || READY.lock().unwrap().is_some() {
         return;
     }
-    let every = schedule.every_min.map(|m| Duration::from_secs(m.max(1) as u64 * 60));
+    let every = schedule.periodic.then_some(PERIODIC_CHECK);
     let mut last = LAST_AUTO.lock().unwrap();
     // How long until the next automatic check (zero = due now; None = none planned).
     let wait = match *last {

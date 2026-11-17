@@ -221,7 +221,12 @@ pub struct Session {
     pub exited: Option<i32>,
     /// Output arrived while the session wasn't visible.
     pub unseen: bool,
+    /// Set by the terminal thread on any event (output, title, cursor, replies); taken by the
+    /// unseen check each frame.
     pub dirty: Arc<AtomicBool>,
+    /// `screen_hash` when the session was last on screen, so repaints that leave the text as it
+    /// was (title spinners, cursor changes, full redraws) don't count as new output.
+    pub seen_hash: u64,
     /// The Claude / Codex conversation this session runs (for resume), once known.
     pub agent_id: Option<String>,
     /// Launch settings (unrestricted, model, effort, CLI parameters), reused on restart.
@@ -249,6 +254,8 @@ pub struct Session {
     started: std::time::Instant,
     last_output: Arc<std::sync::atomic::AtomicU64>,
     last_input: std::time::Instant,
+    /// Unix seconds when a line was last submitted here (0 = not yet): the sidebar's order.
+    pub used: u64,
 }
 
 impl Session {
@@ -312,6 +319,7 @@ impl Session {
             exited: None,
             unseen: false,
             dirty,
+            seen_hash: 0,
             agent_id: resume,
             opts,
             transcript_title: None,
@@ -329,6 +337,7 @@ impl Session {
             started,
             last_output,
             last_input: std::time::Instant::now(),
+            used: 0,
         })
     }
 
@@ -432,6 +441,7 @@ impl Session {
         while let Some(c) = chars.next() {
             match c {
                 '\r' | '\n' => {
+                    self.used = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                     let cmd = self.line_buf.trim();
                     if matches!(cmd, "/clear" | "/new" | "/reset") {
                         self.image_base = self.pasted_images.len();
@@ -470,6 +480,23 @@ impl Session {
                 _ => {}
             }
         }
+    }
+
+    /// Hash of the text on the live screen (ignoring scrollback position, colours and cursor).
+    pub fn screen_hash(&self) -> u64 {
+        use alacritty_terminal::index::{Column, Line};
+        use std::hash::{Hash, Hasher};
+        let t = self.term.lock();
+        let g = t.grid();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (g.screen_lines(), g.columns()).hash(&mut h);
+        for line in 0..g.screen_lines() {
+            let row = &g[Line(line as i32)];
+            for col in 0..g.columns() {
+                row[Column(col)].c.hash(&mut h);
+            }
+        }
+        h.finish()
     }
 
     pub fn resize(&mut self, size: GridSize, cell: (u16, u16)) {

@@ -13,7 +13,6 @@ mod imp {
     extern "system" {
         fn EnumWindows(cb: extern "system" fn(Hwnd, isize) -> i32, lparam: isize) -> i32;
         fn GetWindowThreadProcessId(h: Hwnd, pid: *mut u32) -> u32;
-        fn IsWindowVisible(h: Hwnd) -> i32;
         fn GetWindowTextW(h: Hwnd, buf: *mut u16, max: i32) -> i32;
     }
     #[link(name = "dwmapi")]
@@ -35,7 +34,9 @@ mod imp {
             let s = &mut *(lparam as *mut Search);
             let mut pid = 0u32;
             GetWindowThreadProcessId(h, &mut pid);
-            if pid == s.pid && IsWindowVisible(h) != 0 {
+            // Hidden windows count too: eframe keeps the window hidden until its first frame is
+            // painted, and the caption must be dark before it is shown (else it flashes light).
+            if pid == s.pid {
                 let mut buf = [0u16; 256];
                 let n = GetWindowTextW(h, buf.as_mut_ptr(), buf.len() as i32);
                 if String::from_utf16_lossy(&buf[..n.max(0) as usize]).contains("AI Terminal") {

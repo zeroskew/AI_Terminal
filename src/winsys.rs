@@ -109,6 +109,23 @@ mod imp {
         }
     }
 
+    /// Windows sometimes makes the window the foreground one at start-up without giving it the
+    /// keyboard: keys then go nowhere, and clicking doesn't help (the window is already active, so
+    /// a click doesn't activate it again). When the main window is in front but doesn't hold the
+    /// keyboard, take it. Returns true when it had to. Call on the UI thread.
+    pub fn claim_keyboard_focus() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+        let Some(h) = main_hwnd() else { return false };
+        unsafe {
+            if GetForegroundWindow() != h || GetFocus() == h {
+                return false;
+            }
+            crate::dlog!("main window is in front without the keyboard (focus {:?}): taking it", GetFocus());
+            let _ = SetFocus(Some(h));
+        }
+        true
+    }
+
     pub fn is_main_visible() -> bool {
         main_hwnd().is_some_and(|h| unsafe { IsWindowVisible(h).as_bool() })
     }
@@ -205,6 +222,85 @@ mod imp {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd(v)));
                 let _ = DestroyWindow(hwnd(v));
             }
+        }
+    }
+
+    // ---- single instance -----------------------------------------------------------------------
+    //
+    // While "Allow only one instance" is on, the running app keeps a hidden window of a known
+    // class. A second launch finds it, asks it to show the main window, and exits.
+
+    const WM_ACTIVATE_INSTANCE: u32 = WM_APP + 2;
+    static INSTANCE_HWND: AtomicIsize = AtomicIsize::new(0);
+
+    fn instance_class() -> PCWSTR {
+        // The test instance (own settings) is kept apart from the real one.
+        if crate::update::test_instance() {
+            w!("AITerminalInstanceTest")
+        } else {
+            w!("AITerminalInstance")
+        }
+    }
+
+    unsafe extern "system" fn instance_wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+        if msg == WM_ACTIVATE_INSTANCE {
+            show_main();
+            push(TrayEvent::Shown);
+            return LRESULT(0);
+        }
+        DefWindowProcW(h, msg, wp, lp)
+    }
+
+    /// Creates (on) or removes (off) the window a second launch looks for. Call on the UI thread.
+    pub fn set_single_instance(ctx: &egui::Context, on: bool) {
+        let _ = CTX.set(ctx.clone());
+        let cur = INSTANCE_HWND.load(Ordering::Relaxed);
+        if on == (cur != 0) {
+            return;
+        }
+        unsafe {
+            if !on {
+                INSTANCE_HWND.store(0, Ordering::Relaxed);
+                let _ = DestroyWindow(hwnd(cur));
+                return;
+            }
+            let Ok(inst) = GetModuleHandleW(None) else { return };
+            let class = instance_class();
+            let wc = WNDCLASSW { lpfnWndProc: Some(instance_wndproc), hInstance: HINSTANCE(inst.0), lpszClassName: class, ..Default::default() };
+            RegisterClassW(&wc);
+            // No "AI Terminal" in the title: main_hwnd() looks for that.
+            if let Ok(h) = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("AITerminalInstance"), WS_OVERLAPPED, 0, 0, 0, 0, None, None, Some(HINSTANCE(inst.0)), None) {
+                INSTANCE_HWND.store(h.0 as isize, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// On exit: drop the window, so a relaunch doesn't hand off to this closing process.
+    pub fn release_single_instance() {
+        let v = INSTANCE_HWND.swap(0, Ordering::Relaxed);
+        if v != 0 {
+            unsafe {
+                let _ = DestroyWindow(hwnd(v));
+            }
+        }
+    }
+
+    /// At start-up: if a running instance wants to be the only one, bring it to the front
+    /// (unless `activate` is false) and return true, so this launch exits.
+    pub fn hand_off_to_running_instance(activate: bool) -> bool {
+        unsafe {
+            let Ok(h) = FindWindowW(instance_class(), PCWSTR::null()) else { return false };
+            if h.is_invalid() {
+                return false;
+            }
+            if activate {
+                // We were just launched by the user, so we may pass the right to take the foreground on.
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(h, Some(&mut pid));
+                let _ = AllowSetForegroundWindow(pid);
+                let _ = PostMessageW(Some(h), WM_ACTIVATE_INSTANCE, WPARAM(0), LPARAM(0));
+            }
+            true
         }
     }
 

@@ -79,14 +79,40 @@ impl App {
     /// Options window (gear button): pages on the left,
     /// settings on the right.
     pub(super) fn options_window(&mut self, ctx: &egui::Context) {
-        let Some(page) = self.options else { return };
+        let Some(page) = self.options else {
+            // Closed: the next open starts centred again.
+            self.options_offset = Vec2::ZERO;
+            return;
+        };
         let screen = ctx.content_rect();
         let size = Vec2::new((screen.width() * 0.8).min(1000.0), (screen.height() * 0.85).min(860.0));
         let mut page_now = page;
         let mut close = false;
-        let m = egui::Modal::new(egui::Id::unique("options")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(0)).show(ctx, |ui| {
+        // Keep the window's header reachable: it may go partly off screen, but not past it.
+        let keep = Vec2::new(120.0, 48.0);
+        let max_x = ((screen.width() + size.x) / 2.0 - keep.x).max(0.0);
+        let max_y_down = ((screen.height() + size.y) / 2.0 - keep.y).max(0.0);
+        let max_y_up = ((screen.height() - size.y) / 2.0).max(0.0);
+        let clamp = |o: Vec2| Vec2::new(o.x.clamp(-max_x, max_x), o.y.clamp(-max_y_up, max_y_down));
+        self.options_offset = clamp(self.options_offset);
+        let id = egui::Id::unique("options");
+        let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, self.options_offset);
+        let mut drag_delta = Vec2::ZERO;
+        let m = egui::Modal::new(id).area(area).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(0)).show(ctx, |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
+            // Drag strip along the top edge. Registered before the other widgets so the close
+            // button (and anything else placed over it) still gets its clicks.
+            let strip = egui::Rect::from_min_size(ui.max_rect().min, Vec2::new(size.x, 44.0));
+            let drag = ui.interact(strip, id.with("drag"), Sense::drag());
+            if drag.dragged() {
+                drag_delta = drag.drag_delta();
+            }
+            if drag.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if drag.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 // Page list.
@@ -146,7 +172,8 @@ impl App {
         if m.should_close() {
             close = true;
         }
-        self.options = if close { None } else { Some(page_now) };
+        self.options_offset = clamp(self.options_offset + drag_delta);
+        self.options =if close { None } else { Some(page_now) };
         if self.options != Some(OptPage::Agents) {
             self.agent_confirm = None;
         }
@@ -224,9 +251,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             Self::opt_label(ui, label);
-            let mut c = term_theme::c(*v);
-            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
-                *v = [c.r(), c.g(), c.b()];
+            if crate::color_picker::color_button(ui, v).changed() {
                 hex_edit.remove(label);
             }
             let id = ui.make_persistent_id(("hex", label));
@@ -309,18 +334,16 @@ impl App {
             egui::ComboBox::from_id_salt("scheme").selected_text(current).width(280.0).show_ui(ui, |ui| {
                 for (name, t) in &presets {
                     if ui.selectable_label(current == *name, *name).clicked() {
-                        let (img, op) = (self.s.term_theme.bg_image.clone(), self.s.term_theme.bg_opacity);
-                        self.s.term_theme = t.clone();
-                        self.s.term_theme.bg_image = img;
-                        self.s.term_theme.bg_opacity = op;
+                        let mut nt = t.clone();
+                        nt.keep_background_of(&self.s.term_theme);
+                        self.s.term_theme = nt;
                     }
                 }
             });
             if ui.button("Reset to default").clicked() {
-                let (img, op) = (self.s.term_theme.bg_image.clone(), self.s.term_theme.bg_opacity);
-                self.s.term_theme = term_theme::TermTheme::default();
-                self.s.term_theme.bg_image = img;
-                self.s.term_theme.bg_opacity = op;
+                let mut nt = term_theme::TermTheme::default();
+                nt.keep_background_of(&self.s.term_theme);
+                self.s.term_theme = nt;
             }
         });
         // Live sample of the scheme.
@@ -377,22 +400,56 @@ impl App {
         Self::opt_heading(ui, "BACKGROUND");
         ui.horizontal(|ui| {
             ui.add_space(16.0);
-            Self::opt_label(ui, "Image");
-            let shown = theme.bg_image.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "None".into());
-            ui.label(RichText::new(shown).color(TEXT_DIM));
-            if ui.button("Browse…").clicked() {
-                if let Some(f) = rfd::FileDialog::new().set_title("Terminal background image").add_filter("Images", images::IMAGE_EXTS).pick_file() {
-                    theme.bg_image = Some(f);
-                }
-            }
-            if theme.bg_image.is_some() && ui.button("Clear").clicked() {
-                theme.bg_image = None;
-            }
+            Self::opt_label(ui, "Custom image");
+            ui.checkbox(&mut theme.bg_image_enabled, "Use a background image");
         });
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            Self::opt_label(ui, "Opacity");
-            ui.add_enabled(theme.bg_image.is_some(), egui::Slider::new(&mut theme.bg_opacity, 0.05..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        let on = theme.bg_image_enabled;
+        ui.add_enabled_ui(on, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                Self::opt_label(ui, "Image");
+                let shown = theme.bg_image.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "None".into());
+                ui.label(RichText::new(shown).color(TEXT_DIM));
+                if ui.button("Browse…").clicked() {
+                    if let Some(f) = rfd::FileDialog::new().set_title("Terminal background image").add_filter("Images", images::IMAGE_EXTS).pick_file() {
+                        theme.bg_image = Some(f);
+                    }
+                }
+                if theme.bg_image.is_some() && ui.button("Clear").clicked() {
+                    theme.bg_image = None;
+                }
+            });
+            let has = theme.bg_image.is_some();
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                Self::opt_label(ui, "Opacity");
+                ui.add_enabled(has, egui::Slider::new(&mut theme.bg_opacity, 0.05..=1.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                Self::opt_label(ui, "Blur");
+                ui.add_enabled(has, egui::Slider::new(&mut theme.bg_blur, 0.0..=40.0).step_by(0.5).custom_formatter(|v, _| if v == 0.0 { "Off".into() } else { format!("{v:.1} px") }))
+                    .on_hover_text("Gaussian blur radius (sigma) in pixels; 0 = sharp");
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                Self::opt_label(ui, "Layout");
+                ui.add_enabled_ui(has, |ui| {
+                    egui::ComboBox::from_id_salt("bg_fit").selected_text(theme.bg_fit.label()).width(280.0).show_ui(ui, |ui| {
+                        for f in term_theme::BgFit::ALL {
+                            ui.selectable_value(&mut theme.bg_fit, f, f.label());
+                        }
+                    });
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
+                Self::opt_label(ui, "");
+                ui.add_enabled(has, egui::Checkbox::new(&mut theme.bg_color_override, "Override the core Background colour behind the image"));
+            });
+            ui.add_enabled_ui(has && theme.bg_color_override, |ui| {
+                Self::color_row(ui, &mut self.hex_edit, "Image background", &mut theme.bg_color);
+            });
         });
         self.s.term_theme = theme;
     }
@@ -465,6 +522,7 @@ impl App {
                 Err(e) => self.toast(e, RED, &ui.ctx().clone()),
             }
         }
+        Self::opt_check(ui, &mut self.s.single_instance, "Allow only one instance", "Launching AI Terminal again brings the running window to the front (also from the tray or minimized) instead of opening another one.");
         Self::opt_check(ui, &mut self.s.minimize_to_tray, "Minimize to system tray", "When minimizing the window, hide it to the system tray and keep sessions running.");
         ui.horizontal(|ui| {
             ui.label(RichText::new("When I close the app").size(14.5).color(TEXT));
@@ -487,8 +545,7 @@ impl App {
             });
             ui.horizontal(|ui| {
                 ui.add_space(28.0);
-                ui.checkbox(&mut self.s.update_periodic, "Check every");
-                ui.add_enabled(self.s.update_periodic, egui::DragValue::new(&mut self.s.update_interval_min).range(1..=43_200).speed(1).suffix(" min")).on_hover_text("Counted from start-up, then from the last automatic check. Default 480 (8 hours); at least 1.");
+                ui.checkbox(&mut self.s.update_periodic, "Check twice a day").on_hover_text("Every 12 hours, counted from start-up, then from the last automatic check.");
             });
         });
         ui.add_space(4.0);
@@ -516,9 +573,7 @@ impl App {
                     ui.label(RichText::new(label).color(TEXT));
                 });
                 let v = if value == 0 { &mut self.s.badge_color } else { &mut self.s.badge_text_color };
-                let mut c = term_theme::c(*v);
-                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
-                    *v = [c.r(), c.g(), c.b()];
+                if crate::color_picker::color_button(ui, v).changed() {
                     self.last_badge = None;
                 }
                 if ui.add_enabled(*v != default, egui::Button::new("Reset")).clicked() {
@@ -644,7 +699,7 @@ impl App {
                 ui.label(RichText::new("Terminal sessions for Claude Code, Codex and shells").size(15.0).color(TEXT_DIM));
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Version {}", crate::update::VERSION)).size(13.0).color(TEXT_FAINT));
-                    if ui.small_button("Check for updates…").clicked() {
+                    if super::status_bar::link_button(ui, "Check for updates…", "Check GitHub for a newer release") {
                         self.open_update_dialog(ui.ctx());
                     }
                 });

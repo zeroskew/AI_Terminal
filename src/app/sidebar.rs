@@ -31,7 +31,7 @@ impl App {
             let project = match self.s.projects.iter().find(|p| norm(&p.path) == key) {
                 Some(p) => p.path.clone(),
                 None => {
-                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false });
+                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false, accent: None });
                     f.cwd.clone()
                 }
             };
@@ -118,7 +118,7 @@ impl App {
                 live: true,
                 name: t.sess.display_name(),
                 profile: t.sess.profile.clone(),
-                created: t.created,
+                used: t.sess.used.max(t.created),
                 exited: t.sess.exited,
                 unseen: t.sess.unseen,
                 images: t.sess.pasted_images.len(),
@@ -136,7 +136,7 @@ impl App {
             live: false,
             name: d.display_name(),
             profile: d.saved.profile.clone(),
-            created: d.saved.created,
+            used: d.saved.used.max(d.saved.created),
             exited: None,
             unseen: false,
             images: 0,
@@ -150,13 +150,13 @@ impl App {
         }));
         let on_top = self.s.active_on_top;
         // Pinned first (in their order), then the active (running) ones if set, then the rest;
-        // newest first within each; archived ones last.
+        // most recently used first within each; archived ones last.
         v.sort_by(|a, b| {
             a.archived
                 .cmp(&b.archived)
                 .then_with(|| (a.pin == 0, a.pin).cmp(&(b.pin == 0, b.pin)))
                 .then_with(|| if on_top { (!a.is_active()).cmp(&!b.is_active()) } else { std::cmp::Ordering::Equal })
-                .then_with(|| (b.created, b.id).cmp(&(a.created, a.id)))
+                .then_with(|| (b.used, b.id).cmp(&(a.used, a.id)))
         });
         v
     }
@@ -179,7 +179,7 @@ impl App {
         self.s.projects.retain(|x| x.path != p);
         if self.s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true });
+            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None });
         }
         if self.s.selected_project.as_deref() == Some(p) {
             self.select_project(None);
@@ -194,6 +194,13 @@ impl App {
         }
         if self.s.selected_project.as_deref() == Some(p) {
             self.select_project(None);
+        }
+    }
+
+    /// Sets (or clears, with None) a project's accent colour.
+    pub(super) fn set_project_accent(&mut self, p: &Path, accent: Option<[u8; 3]>) {
+        if let Some(x) = self.s.projects.iter_mut().find(|x| x.path == p) {
+            x.accent = accent;
         }
     }
 
@@ -340,7 +347,7 @@ impl App {
                 if row.archived && !show_archived {
                     continue;
                 }
-                let group = if row.archived { "Archived".to_string() } else if row.pin > 0 { "Pinned".to_string() } else if self.s.active_on_top && row.is_active() { "Active".to_string() } else { day_label(today, local_day(row.created)) };
+                let group = if row.archived { "Archived".to_string() } else if row.pin > 0 { "Pinned".to_string() } else if self.s.active_on_top && row.is_active() { "Active".to_string() } else { day_label(today, local_day(row.used)) };
                 if last_group.as_ref() != Some(&group) {
                     ui.add_space(4.0);
                     if row.archived {

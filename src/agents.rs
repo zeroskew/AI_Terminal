@@ -529,6 +529,18 @@ pub fn claude_dir(cwd: &Path) -> Option<PathBuf> {
     Some(home()?.join(".claude").join("projects").join(mangled))
 }
 
+/// Whether conversation `id` (of `kind`, run in `cwd`) can be resumed. Claude reports its id
+/// (SessionStart hook) at startup but writes the transcript only with the first message, so a
+/// session left untouched has an id with nothing behind it. The other agents' ids are only
+/// known once their files exist.
+pub fn conversation_exists(kind: Kind, cwd: &Path, id: Option<&str>) -> bool {
+    match (kind, id) {
+        (_, None) => false,
+        (Kind::Claude, Some(id)) => claude_dir(cwd).is_some_and(|d| d.join(format!("{id}.jsonl")).is_file()),
+        _ => true,
+    }
+}
+
 /// The oldest Claude transcript in `cwd`'s folder created since `since`, not in `claimed`.
 /// Claude writes it with the first message, so callers poll.
 pub fn find_claude_id(cwd: &Path, since: SystemTime, claimed: &std::collections::HashSet<String>) -> Option<String> {
