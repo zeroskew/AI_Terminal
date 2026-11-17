@@ -136,7 +136,7 @@ fn strip_flag(params: &mut Vec<String>, flags: &[&str]) {
     }
 }
 
-/// When set, Claude sessions get `--append-system-prompt` describing AI Terminal's colour tags.
+/// When set, Claude sessions get `--append-system-prompt` describing AI Terminal's color tags.
 pub static COLOR_TAG_PROMPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// When set, new agent sessions (not resumed, not named at launch) are asked to name themselves
@@ -201,7 +201,7 @@ fn toml_string(s: &str) -> String {
     out
 }
 
-/// The `--append-system-prompt` text for a Claude session: the colour-tag guide and/or the
+/// The `--append-system-prompt` text for a Claude session: the color-tag guide and/or the
 /// naming instruction (only for a new conversation the user didn't name at launch).
 fn appended_prompt(color_tags: bool, name_sessions: bool, name: &str, resume: Option<&str>) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
@@ -405,7 +405,16 @@ pub fn claude_settings_effort(cwd: &Path) -> Option<String> {
 fn run_quiet(program: &str, args: &[&str]) -> Option<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = std::process::Command::new(program).args(args).creation_flags(CREATE_NO_WINDOW).stdin(std::process::Stdio::null()).output().ok()?;
+    let out = std::process::Command::new(program)
+        .args(args)
+        // `agy` starts its daily background updater in a new console of its own, which our
+        // CREATE_NO_WINDOW doesn't reach: a Windows Terminal window flashed up at start-up.
+        // (It must be "true"; "1" is ignored.)
+        .env("AGY_CLI_DISABLE_AUTO_UPDATE", "true")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
     Some(String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
 }
 

@@ -452,7 +452,7 @@ mod imp {
     }
 
     unsafe fn icon_from_rgba(rgba: &[u8], size: i32) -> Option<HICON> {
-        // Windows wants BGRA rows; alpha is taken from the 32-bit colour bitmap.
+        // Windows wants BGRA rows; alpha is taken from the 32-bit color bitmap.
         let bgra: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
         let color = CreateBitmap(size, size, 1, 32, Some(bgra.as_ptr() as *const _));
         let mask_bits = vec![0u8; ((size + 15) / 16 * 2 * size) as usize];

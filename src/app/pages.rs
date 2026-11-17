@@ -9,7 +9,7 @@ impl App {
         let mut open: Option<PathBuf> = None;
         let mut set_tab: Option<(PathBuf, bool)> = None;
         let mut remove: Option<PathBuf> = None;
-        let mut rename: Option<PathBuf> = None;
+        let mut settings: Option<PathBuf> = None;
         let mut set_accent: Option<(PathBuf, Option<[u8; 3]>)> = None;
         let mut swatch_clicked = false;
         let tab_order = self.tab_projects();
@@ -25,7 +25,7 @@ impl App {
                         ui.label(RichText::new("AI Terminal  ·  Projects").family(bold()).size(22.0).color(TEXT));
                         // Home has no sidebar, so Options (gear) and plugins get their buttons here.
                         ui.add_space(12.0);
-                        if widgets::icon_button(ui, Icon::Plugin, 28.0, TEXT_DIM, "Claude Code plugins").clicked() {
+                        if widgets::icon_button(ui, Icon::Plugin, 28.0, TEXT_DIM, "Plugins").clicked() {
                             self.open_plugins();
                         }
                         if widgets::icon_button(ui, Icon::Gear, 28.0, TEXT_DIM, "Options").clicked() {
@@ -47,18 +47,54 @@ impl App {
                             p.rect_filled(rect, 8.0, if resp.hovered() { CARD_HI } else { CARD });
                             if let Some(a) = accent {
                                 // A soft wash from the top and an accent edge on the left, clipped to the card.
-                                let head = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), rect.top() + 48.0));
-                                let mut mesh = egui::Mesh::default();
+                                // Both shapes follow the card's 8px corners rather than overhanging them.
+                                const R: f32 = 8.0;
+                                const ARC_STEPS: usize = 8;
+                                // Point on the corner circle centred at `c`, at angle `t` (radians, screen space).
+                                let arc = |c: egui::Pos2, t: f32| egui::pos2(c.x + R * t.cos(), c.y + R * t.sin());
+                                use std::f32::consts::{FRAC_PI_2, PI};
+                                let head_h = 48.0;
                                 let c = a.gamma_multiply(if resp.hovered() { 0.16 } else { 0.10 });
-                                mesh.colored_vertex(head.left_top(), c);
-                                mesh.colored_vertex(head.right_top(), c);
-                                mesh.colored_vertex(head.left_bottom(), Color32::TRANSPARENT);
-                                mesh.colored_vertex(head.right_bottom(), Color32::TRANSPARENT);
-                                mesh.add_triangle(0, 1, 2);
-                                mesh.add_triangle(1, 3, 2);
-                                p.with_clip_rect(rect.shrink(1.0)).add(egui::Shape::mesh(mesh));
-                                let edge = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + 3.5, rect.bottom()));
-                                p.rect_filled(edge, egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }, a);
+                                // Outline of the top band, clockwise: top-left arc, top-right arc, then straight down.
+                                let mut pts = Vec::with_capacity(2 * ARC_STEPS + 4);
+                                let tl = egui::pos2(rect.left() + R, rect.top() + R);
+                                let tr = egui::pos2(rect.right() - R, rect.top() + R);
+                                for i in 0..=ARC_STEPS {
+                                    pts.push(arc(tl, PI + FRAC_PI_2 * i as f32 / ARC_STEPS as f32));
+                                }
+                                for i in 0..=ARC_STEPS {
+                                    pts.push(arc(tr, PI + FRAC_PI_2 + FRAC_PI_2 * i as f32 / ARC_STEPS as f32));
+                                }
+                                pts.push(egui::pos2(rect.right(), rect.top() + head_h));
+                                pts.push(egui::pos2(rect.left(), rect.top() + head_h));
+                                let mut mesh = egui::Mesh::default();
+                                let shade = |pt: egui::Pos2| {
+                                    let f = 1.0 - ((pt.y - rect.top()) / head_h).clamp(0.0, 1.0);
+                                    c.gamma_multiply(f)
+                                };
+                                let centre = egui::pos2(rect.center().x, rect.top() + head_h * 0.5);
+                                mesh.colored_vertex(centre, shade(centre));
+                                for &pt in &pts {
+                                    mesh.colored_vertex(pt, shade(pt));
+                                }
+                                let n = pts.len() as u32;
+                                for i in 0..n {
+                                    mesh.add_triangle(0, 1 + i, 1 + (i + 1) % n);
+                                }
+                                p.add(egui::Shape::mesh(mesh));
+                                // Left accent edge: the slice of the card left of `w`, so its ends curve with the corners.
+                                let w = 3.5;
+                                let t0 = ((R - w) / R).acos(); // angle (from the horizontal) where the arc meets x = left + w
+                                let bl = egui::pos2(rect.left() + R, rect.bottom() - R);
+                                let mut edge = Vec::with_capacity(2 * ARC_STEPS + 2);
+                                // Clockwise on screen: up the left side from bottom to top, then down the right side.
+                                for i in 0..=ARC_STEPS {
+                                    edge.push(arc(bl, PI - t0 + t0 * i as f32 / ARC_STEPS as f32));
+                                }
+                                for i in 0..=ARC_STEPS {
+                                    edge.push(arc(tl, PI + t0 * i as f32 / ARC_STEPS as f32));
+                                }
+                                p.add(egui::Shape::convex_polygon(edge, a, Stroke::NONE));
                             }
                             let border = match (resp.hovered(), accent) {
                                 (true, Some(a)) => a,
@@ -66,8 +102,18 @@ impl App {
                                 _ => BORDER,
                             };
                             p.rect_stroke(rect, 8.0, Stroke::new(1.0, border), egui::StrokeKind::Inside);
-                            widgets::paint_icon(p, Icon::Folder, egui::pos2(rect.left() + 22.0, rect.top() + 24.0), 16.0, accent.unwrap_or(Color32::from_rgb(222, 184, 92)));
-                            p.text(egui::pos2(rect.left() + 40.0, rect.top() + 24.0), egui::Align2::LEFT_CENTER, &proj.name, egui::FontId::new(15.0, bold()), TEXT);
+                            // The project's image if it has one, else the folder icon.
+                            let image = self.project_image(&proj.path);
+                            let name_x = if image.is_some() { 48.0 } else { 40.0 };
+                            let drawn = image.is_some_and(|img| {
+                                let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 26.0, rect.top() + 24.0), Vec2::splat(26.0));
+                                self.paint_project_image(ui, &img, ir, 4)
+                            });
+                            let p = ui.painter();
+                            if !drawn {
+                                widgets::paint_icon(p, Icon::Folder, egui::pos2(rect.left() + 22.0, rect.top() + 24.0), 16.0, accent.unwrap_or(Color32::from_rgb(222, 184, 92)));
+                            }
+                            p.text(egui::pos2(rect.left() + name_x, rect.top() + 24.0), egui::Align2::LEFT_CENTER, &proj.name, egui::FontId::new(15.0, bold()), TEXT);
                             let mut job = egui::text::LayoutJob::simple_singleline(proj.path.display().to_string(), egui::FontId::proportional(12.0), TEXT_FAINT);
                             job.wrap.max_width = card_w - 32.0;
                             job.wrap.max_rows = 1;
@@ -86,7 +132,7 @@ impl App {
                             {
                                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(ctl).layout(Layout::right_to_left(Align::Center)));
                                 ui.spacing_mut().item_spacing.x = 10.0;
-                                // Text links painted by hand so they can take a colour on hover.
+                                // Text links painted by hand so they can take a color on hover.
                                 let link = |ui: &mut Ui, text: &str, hover: Color32| {
                                     let g = ui.painter().layout_no_wrap(text.into(), egui::FontId::proportional(12.0), TEXT_DIM);
                                     let (rr, r) = ui.allocate_exact_size(g.size() + Vec2::new(8.0, 4.0), Sense::click());
@@ -101,15 +147,15 @@ impl App {
                                 if link(ui, "Remove", RED).on_hover_text("Remove this project from AI Terminal (asks first; files are not deleted)").clicked() {
                                     remove = Some(proj.path.clone());
                                 }
-                                if link(ui, "Rename", ACCENT_HI).on_hover_text("Rename this project (only its name in AI Terminal; the folder is not renamed)").clicked() {
-                                    rename = Some(proj.path.clone());
+                                if link(ui, "Settings", ACCENT_HI).on_hover_text("Project settings: name, image, accent color").clicked() {
+                                    settings = Some(proj.path.clone());
                                 }
                                 let cb = ui.checkbox(&mut shown, RichText::new("Show in tabs").size(12.0).color(TEXT_DIM));
                                 if cb.on_hover_text("Show this project as a tab in the top bar. Unticking only closes the tab; the project stays here.").changed() {
                                     set_tab = Some((proj.path.clone(), shown));
                                 }
                             }
-                            // Accent swatch, bottom-left: opens the colour picker.
+                            // Accent swatch, bottom-left: opens the color picker.
                             let sr = egui::Rect::from_center_size(egui::pos2(rect.left() + 24.0, ctl.center().y), Vec2::splat(22.0));
                             let sresp = ui.interact(sr, egui::Id::unique(("project_accent", &proj.path)), Sense::click());
                             if sresp.hovered() {
@@ -117,7 +163,7 @@ impl App {
                                 ui.painter().rect_filled(sr, 5.0, CARD_HI.gamma_multiply(1.3));
                             }
                             widgets::paint_swatch(ui.painter(), sr.center(), 6.5, accent, false, sresp.hovered());
-                            let sresp = sresp.on_hover_text(if accent.is_some() { "Accent colour (tints this project's tab)" } else { "Set an accent colour for this project's tab" });
+                            let sresp = sresp.on_hover_text(if accent.is_some() { "Accent color (tints this project's tab)" } else { "Set an accent color for this project's tab" });
                             egui::Popup::menu(&sresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                                 ui.set_min_width(170.0);
                                 if let Some(c) = widgets::accent_picker(ui, proj.accent) {
@@ -161,24 +207,33 @@ impl App {
         }
         if let Some(p) = remove {
             self.confirm_remove_project = Some(p);
-        } else if let Some(p) = rename {
-            let name = self.s.projects.iter().find(|x| x.path == p).map(|x| x.name.clone()).unwrap_or_default();
-            self.renaming_project = Some((p, name));
+        } else if let Some(p) = settings {
+            self.open_project_settings(&p);
         } else if let Some(p) = open.filter(|_| !toggled) {
             self.select_project(Some(p));
         }
     }
 
     /// Central area of a project with no session open.
-    pub(super) fn empty_project(&mut self, ui: &mut Ui) {
+    pub(super) fn empty_project(&mut self, ui: &mut Ui, theme: &crate::term_theme::TermTheme) {
         let ctx = ui.ctx().clone();
         let project = self.current_project();
         let name = self.s.projects.iter().find(|p| p.path == project).map(|p| p.name.clone()).unwrap_or_default();
         let listed = self.project_session_count(&project);
-        ui.painter().rect_filled(ui.max_rect(), 0.0, BG);
+        // With a background image (global or the project's own), show it here as in a session.
+        let full = ui.max_rect();
+        let has_image = theme.active_bg_image().is_some_and(|p| self.cache.exists(p));
+        ui.painter().rect_filled(full, 0.0, if has_image { crate::term_theme::c(theme.effective_background()) } else { BG });
+        if has_image {
+            crate::view::paint_theme_bg_image(ui, &mut self.cache, theme, full);
+        }
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.33);
-            if let Some(tex) = &self.logo {
+            if let Some(img) = self.project_image(&project) {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
+                self.paint_project_image(ui, &img, r, 8);
+                ui.add_space(8.0);
+            } else if let Some(tex) = &self.logo {
                 ui.add(egui::Image::new((tex.id(), Vec2::splat(56.0))));
                 ui.add_space(8.0);
             }
@@ -206,7 +261,7 @@ impl App {
             if is_home_dir(&project) {
                 ui.add_space(14.0);
                 ui.label(RichText::new("Claude Code asks to trust your home folder every time (it never remembers it there).").color(ORANGE).size(12.5));
-                ui.label(RichText::new("Add a project folder (Add Project, top right) to avoid the prompt.").color(TEXT_DIM).size(12.5));
+                ui.label(RichText::new("Add a project folder (the + after the project tabs) to avoid the prompt.").color(TEXT_DIM).size(12.5));
             }
             let hint = if listed > 0 { "or pick a session on the left to resume it" } else { "▼ next to New session on the left starts another shell" };
             ui.label(RichText::new(hint).color(TEXT_DIM).size(12.5));

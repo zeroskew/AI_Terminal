@@ -25,7 +25,11 @@ installs it over the exe you started (Options > General > Updates).
 ## Features
 
 - **Layout**: project tabs across the top (Home + a tab per project ticked **Show in tabs**;
-  a dot shows sessions, orange when one has new output), "Add Project" on the right.
+  a dot shows sessions, orange when one has new output), a "+" after the tabs adds a project.
+  With many tabs, long names are cut with "…" first; tabs that still don't fit go into a "»"
+  menu (with a filter box once it gets long). The selected tab always stays in the bar, the "»"
+  shows a dot when a project in it has new activity, picking one moves it into the bar, and
+  dropping a dragged tab on "»" sends it there.
   The left panel shows the selected project: the **New Claude session ▼** split button, the
   SESSIONS list (Today / Yesterday / This week…), a filter box and the Options gear. Home shows
   a card for every project, with **Show in tabs**, **Rename** and **Remove**. Closing a tab (its ×,
@@ -55,22 +59,22 @@ installs it over the exe you started (Options > General > Updates).
   (`claude --resume <id>`, `codex resume <id>`) with the same settings; shells aren't kept.
   Right-click a session: Rename, Resume / Restart, Restart as Unrestricted / Restricted,
   Restart with settings…, Close. Double-click renames.
-- **Coloured text in Claude's replies**: Claude Code's markdown has no text colour, so AI
-  Terminal renders colour tags — `{green}Passed{/}`, `{red}Failed{/red}`, `{#ff8800}…{/}`
+- **Colored text in Claude's replies**: Claude Code's markdown has no text color, so AI
+  Terminal renders color tags — `{green}Passed{/}`, `{red}Failed{/red}`, `{#ff8800}…{/}`
   (red, green, yellow, blue, magenta, cyan, white, gray, black, orange, purple, pink, #rrggbb).
   Backgrounds: `{bg:red}WARNING{/}` behind text, `{row:green}+ added line{/}` across the whole
-  row (diff-style); named colours use Claude Code's dark diff shades (rows `#3d0100` / `#022800`,
+  row (diff-style); named colors use Claude Code's dark diff shades (rows `#3d0100` / `#022800`,
   changed characters `#5c0200` / `#044700`), `#rrggbb` is exact.
   Tags nest: `{bg:red}{white}x{/}{/}`.
   Sessions started here tell Claude about them with `--append-system-prompt` (your CLAUDE.md
   isn't touched). A tag only counts when it opens and closes on the same line, so code like
   `f"{red}"` is left alone; the hidden tag characters become padding before the next table
-  border, so tables stay aligned. Colour emoji (🟢 ✅ ⭐) are drawn in colour too. Both can be
+  border, so tables stay aligned. Color emoji (🟢 ✅ ⭐) are drawn in color too. Both can be
   switched off in Options > Terminal.
-- **Options** (gear): Terminal (font family and size, colour-scheme presets, background /
-  foreground / cursor / selection and the 16 ANSI colours with pickers and hex values, a
+- **Options** (gear): Terminal (font family and size, color-scheme presets, background /
+  foreground / cursor / selection and the 16 ANSI colors with pickers and hex values, a
   background image with opacity), Images, General, About.
-- **Real terminal**: ConPTY + the alacritty VT emulator (true colour, 256 colours, alternate
+- **Real terminal**: ConPTY + the alacritty VT emulator (true color, 256 colors, alternate
   screen, mouse reporting, bracketed paste, 20 000 lines of scrollback). Box-drawing characters
   are drawn as shapes so Claude Code's frames join seamlessly.
 - **Image paste**: Ctrl+V with

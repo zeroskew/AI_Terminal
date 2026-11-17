@@ -1,14 +1,14 @@
-//! Colour emoji. egui draws glyphs from outlines only, so 🟢🔴✅ come out as grey shapes.
-//! A browser-based terminal shows them in colour, so we do the same here:
-//! DirectWrite + Direct2D rasterize the emoji with Segoe UI Emoji's colour layers into a
-//! bitmap, cached as a texture per (emoji, pixel size, colour). The terminal draws that texture
+//! Color emoji. egui draws glyphs from outlines only, so 🟢🔴✅ come out as grey shapes.
+//! A browser-based terminal shows them in color, so we do the same here:
+//! DirectWrite + Direct2D rasterize the emoji with Segoe UI Emoji's color layers into a
+//! bitmap, cached as a texture per (emoji, pixel size, color). The terminal draws that texture
 //! in the emoji's cells.
 
 use std::collections::HashMap;
 
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions};
 
-/// Whether a cell's text should be drawn as a colour emoji: anything in the emoji planes
+/// Whether a cell's text should be drawn as a color emoji: anything in the emoji planes
 /// (U+1F000…), characters that default to emoji presentation in the BMP (⚪ ✅ ⭐ …), and any
 /// character followed by VS16 (U+FE0F). Text symbols Claude Code uses (✻ ✓ ⎿ ●) stay text.
 pub fn is_emoji(c: char, extra: Option<&[char]>) -> bool {
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_in_colour() {
+    fn renders_in_color() {
         let img = imp::render("🟢", [40, 40], egui::Color32::WHITE).expect("render");
         // A green circle: some opaque pixels with green clearly dominant.
         let green = img.pixels.iter().filter(|p| p.a() > 200 && p.g() as i32 > p.r() as i32 + 60).count();

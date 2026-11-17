@@ -158,6 +158,7 @@ impl App {
         // Panel size: all panels share it; dragging any panel's top / left edge changes it.
         let mut size = self.s.script_panel_size;
         let screen = ctx.content_rect();
+        let project_accent: Vec<(PathBuf, Color32)> = self.s.projects.iter().filter_map(|p| Some((p.path.clone(), p.accent_color()?))).collect();
         for r in self.script_runs.iter_mut() {
             let [w, out_h] = size.unwrap_or([520.0, 260.0]);
             let (w, out_h) = (w.clamp(320.0, (screen.width() - 24.0).max(320.0)), out_h.clamp(60.0, (screen.height() - 200.0).max(60.0)));
@@ -193,12 +194,25 @@ impl App {
             let area = egui::Area::new(egui::Id::unique(("script_run", r.id))).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-12.0, -y)).order(egui::Order::Foreground);
             let resp = area.show(ctx, |ui| {
                 ui.multiply_opacity(opacity);
-                let frame = egui::Frame::new().fill(PANEL).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
+                // Accented by its status: a tinted border, a soft glow along the header and a status dot.
+                let shadow = egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(150) };
+                let frame = egui::Frame::new().fill(PANEL).corner_radius(8).stroke(Stroke::new(1.5, col.gamma_multiply(0.6))).shadow(shadow).inner_margin(10).show(ui, |ui| {
                     ui.set_width(w);
-                    ui.horizontal(|ui| {
+                    // Painted under the header once its height is known.
+                    let glow = ui.painter().add(egui::Shape::Noop);
+                    let header = ui.horizontal(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        ui.painter().circle_filled(dot.center(), 4.0, col);
+                        if r.exit.is_none() {
+                            // A ring pulsing out of the dot while it runs.
+                            let t = (ui.input(|i| i.time) as f32 * 1.2).fract();
+                            ui.painter().circle_stroke(dot.center(), 4.0 + 4.0 * t, Stroke::new(1.5, col.gamma_multiply(1.0 - t)));
+                            ctx.request_repaint();
+                        }
                         ui.label(RichText::new(&r.name).family(bold()).color(TEXT));
                         if r.agent.is_none() {
-                            ui.label(RichText::new(format!("in {}", project_name(&r.cwd))).size(12.0).color(TEXT_FAINT));
+                            let proj = project_accent.iter().find(|(p, _)| p == &r.cwd).map(|(_, c)| *c);
+                            ui.label(RichText::new(format!("in {}", project_name(&r.cwd))).size(12.0).color(proj.unwrap_or(TEXT_FAINT)));
                         }
                         ui.label(RichText::new(status).size(12.0).color(col));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -218,6 +232,20 @@ impl App {
                             }
                         });
                     });
+                    // The header glow: the status color fading out downwards from the top edge.
+                    let hr = header.response.rect;
+                    let band = egui::Rect::from_min_max(egui::pos2(hr.left() - 9.0, hr.top() - 9.0), egui::pos2(hr.right() + 9.0, hr.bottom() + 6.0));
+                    // Corners cut so it stays inside the panel's rounded corners.
+                    let mut mesh = egui::Mesh::default();
+                    let shade = |y: f32| col.gamma_multiply(0.16 * (band.bottom() - y) / band.height());
+                    let cut = 5.0;
+                    for (x, y) in [(band.left() + cut, band.top()), (band.right() - cut, band.top()), (band.right(), band.top() + cut), (band.right(), band.bottom()), (band.left(), band.bottom()), (band.left(), band.top() + cut)] {
+                        mesh.colored_vertex(egui::pos2(x, y), shade(y));
+                    }
+                    for i in 1..5 {
+                        mesh.add_triangle(0, i, i + 1);
+                    }
+                    ui.painter().set(glow, mesh);
                     if !r.collapsed {
                         egui::Frame::new().fill(BG).corner_radius(4).inner_margin(6).show(ui, |ui| {
                             // Once resized, the output keeps that height; by default it fits short output.
@@ -512,7 +540,7 @@ impl ScriptRun {
         Some(code)
     }
 
-    /// The output so far: UTF-8, without colour codes, CRLF as LF.
+    /// The output so far: UTF-8, without color codes, CRLF as LF.
     fn text(&mut self) -> String {
         let o = self.out.lock().unwrap();
         if self.text.0 != o.len() {

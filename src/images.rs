@@ -269,13 +269,13 @@ fn shrink_to(img: image::RgbaImage, max: u32) -> image::RgbaImage {
     resize_rgba(&img, ((w as f64 * k).round() as u32).max(1), ((h as f64 * k).round() as u32).max(1))
 }
 
-/// Lanczos resize that respects transparency: filters premultiplied colour, so the (often black)
-/// colour of fully transparent pixels doesn't bleed into soft edges as a dark fringe.
+/// Lanczos resize that respects transparency: filters premultiplied color, so the (often black)
+/// color of fully transparent pixels doesn't bleed into soft edges as a dark fringe.
 fn resize_rgba(src: &image::RgbaImage, w: u32, h: u32) -> image::RgbaImage {
     resize_blur_rgba(src, w, h, 0.0)
 }
 
-/// `resize_rgba`, then a Gaussian blur of `sigma` pixels (also on premultiplied colour).
+/// `resize_rgba`, then a Gaussian blur of `sigma` pixels (also on premultiplied color).
 fn resize_blur_rgba(src: &image::RgbaImage, w: u32, h: u32, sigma: f32) -> image::RgbaImage {
     use image::imageops::{resize, FilterType::Lanczos3};
     let opaque = src.pixels().all(|p| p[3] == 255);

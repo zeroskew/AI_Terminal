@@ -8,9 +8,9 @@ impl App {
         self.tabs.iter().filter(|t| t.project == p).map(|t| t.sess.id).collect()
     }
 
-    /// Running + listed (not running, not archived) sessions of a project.
+    /// Running + listed (not running, not archived or saved for later) sessions of a project.
     pub(super) fn project_session_count(&self, p: &Path) -> usize {
-        self.project_sessions(p).len() + self.dormant.iter().filter(|d| d.saved.project == p && !d.saved.archived).count()
+        self.project_sessions(p).len() + self.dormant.iter().filter(|d| d.saved.project == p && !d.saved.archived && !d.saved.later).count()
     }
 
     /// Lists the Claude conversations found by the start-up scan that aren't listed yet (each
@@ -31,7 +31,7 @@ impl App {
             let project = match self.s.projects.iter().find(|p| norm(&p.path) == key) {
                 Some(p) => p.path.clone(),
                 None => {
-                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false, accent: None });
+                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false, accent: None, image: None, background: None });
                     f.cwd.clone()
                 }
             };
@@ -46,6 +46,7 @@ impl App {
                 cost: None,
                 pin: 0,
                 archived: false,
+                later: false,
                 used: f.used,
             };
             let id = self.next_id;
@@ -60,8 +61,8 @@ impl App {
     }
 
     /// "Keep the last N sessions": per project, listed sessions past the N most recently used
-    /// move to Archived. Running and pinned sessions are never archived (running ones count
-    /// towards N).
+    /// move to Archived. Running, pinned and saved-for-later sessions are never archived (running
+    /// ones count towards N).
     pub(super) fn auto_archive(&mut self) {
         let keep = self.s.keep_sessions as usize;
         if keep == 0 {
@@ -73,7 +74,7 @@ impl App {
                 .dormant
                 .iter()
                 .enumerate()
-                .filter(|(_, d)| d.saved.project == p && !d.saved.archived && d.saved.pin == 0)
+                .filter(|(_, d)| d.saved.project == p && !d.saved.archived && !d.saved.later && d.saved.pin == 0)
                 .map(|(i, d)| (d.saved.used.max(d.saved.created), i))
                 .collect();
             if running + listed.len() <= keep {
@@ -92,10 +93,29 @@ impl App {
             self.park(id, "archived");
             if let Some(d) = self.dormant.last_mut() {
                 d.saved.archived = true;
+                d.saved.later = false;
                 d.saved.pin = 0;
             }
         } else if let Some(d) = self.dormant.iter_mut().find(|d| d.id == id) {
             d.saved.archived = true;
+            d.saved.later = false;
+            d.saved.pin = 0;
+        }
+    }
+
+    /// Sets a session aside in Saved for later (a running one is closed first; it stays
+    /// resumable). Unlike Archived, it's never moved there automatically, nor out of it.
+    pub(super) fn save_for_later(&mut self, id: u64) {
+        if self.tabs.iter().any(|t| t.sess.id == id) {
+            self.park(id, "saved for later");
+            if let Some(d) = self.dormant.last_mut() {
+                d.saved.later = true;
+                d.saved.archived = false;
+                d.saved.pin = 0;
+            }
+        } else if let Some(d) = self.dormant.iter_mut().find(|d| d.id == id) {
+            d.saved.later = true;
+            d.saved.archived = false;
             d.saved.pin = 0;
         }
     }
@@ -104,6 +124,7 @@ impl App {
     pub(super) fn unarchive(&mut self, id: u64) {
         if let Some(d) = self.dormant.iter_mut().find(|d| d.id == id) {
             d.saved.archived = false;
+            d.saved.later = false;
             d.saved.used = now_secs();
         }
     }
@@ -129,6 +150,7 @@ impl App {
             attention_msg: t.sess.attention.clone(),
             pin: t.pin,
             archived: false,
+            later: false,
             })
             .collect();
         v.extend(self.dormant.iter().filter(|d| d.saved.project == p).map(|d| Row {
@@ -147,13 +169,14 @@ impl App {
             attention_msg: None,
             pin: d.saved.pin,
             archived: d.saved.archived,
+            later: d.saved.later,
         }));
         let on_top = self.s.active_on_top;
         // Pinned first (in their order), then the active (running) ones if set, then the rest;
-        // most recently used first within each; archived ones last.
+        // most recently used first within each; then Saved for later, then Archived.
         v.sort_by(|a, b| {
-            a.archived
-                .cmp(&b.archived)
+            (a.archived, a.later)
+                .cmp(&(b.archived, b.later))
                 .then_with(|| (a.pin == 0, a.pin).cmp(&(b.pin == 0, b.pin)))
                 .then_with(|| if on_top { (!a.is_active()).cmp(&!b.is_active()) } else { std::cmp::Ordering::Equal })
                 .then_with(|| (b.used, b.id).cmp(&(a.used, a.id)))
@@ -176,10 +199,15 @@ impl App {
             self.close(id);
         }
         self.remembered.remove(p);
+        if let Some(x) = self.s.projects.iter().find(|x| x.path == p) {
+            for img in x.image.iter().chain(x.background.as_ref().and_then(|b| b.image.as_ref())) {
+                project_settings::discard_image(img);
+            }
+        }
         self.s.projects.retain(|x| x.path != p);
         if self.s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None });
+            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None });
         }
         if self.s.selected_project.as_deref() == Some(p) {
             self.select_project(None);
@@ -197,7 +225,7 @@ impl App {
         }
     }
 
-    /// Sets (or clears, with None) a project's accent colour.
+    /// Sets (or clears, with None) a project's accent color.
     pub(super) fn set_project_accent(&mut self, p: &Path, accent: Option<[u8; 3]>) {
         if let Some(x) = self.s.projects.iter_mut().find(|x| x.path == p) {
             x.accent = accent;
@@ -245,44 +273,6 @@ impl App {
         }
     }
 
-    pub(super) fn rename_project_dialog(&mut self, ctx: &egui::Context) {
-        let Some((path, buf)) = &mut self.renaming_project else { return };
-        let path = path.clone();
-        let mut done = None;
-        let m = egui::Modal::new(egui::Id::unique("rename_project")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(16)).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.label(RichText::new("Rename project").family(bold()).size(15.0).color(TEXT));
-            ui.label(RichText::new(path.display().to_string()).size(12.0).color(TEXT_FAINT));
-            ui.add_space(6.0);
-            let te = ui.add(egui::TextEdit::singleline(buf).desired_width(f32::INFINITY));
-            te.request_focus();
-            if te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                done = Some(true);
-            }
-            ui.add_space(8.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("Rename").clicked() {
-                    done = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    done = Some(false);
-                }
-            });
-        });
-        if m.should_close() && done.is_none() {
-            done = Some(false);
-        }
-        if let Some(ok) = done {
-            let (_, name) = self.renaming_project.take().unwrap();
-            if ok && !name.trim().is_empty() {
-                if let Some(p) = self.s.projects.iter_mut().find(|x| x.path == path) {
-                    p.name = name.trim().to_string();
-                }
-            }
-            self.focus_terminal = true;
-        }
-    }
-
     /// Left panel for the selected project: New session, the sessions list grouped by day.
     pub(super) fn sidebar(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
@@ -304,16 +294,11 @@ impl App {
 
         let rows = self.rows(&project);
         let archived = rows.iter().filter(|r| r.archived).count();
+        let later = rows.iter().filter(|r| r.later && !r.archived).count();
         ui.horizontal(|ui| {
             ui.label(RichText::new("SESSIONS").size(11.0).family(bold()).color(TEXT_DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::icon_button(ui, Icon::Gear, 24.0, TEXT_DIM, "Options").clicked() {
-                    self.options = Some(OptPage::General);
-                }
-                if widgets::icon_button(ui, Icon::Plugin, 24.0, TEXT_DIM, "Claude Code plugins").clicked() {
-                    self.open_plugins();
-                }
-                let n = rows.len() - archived;
+                let n = rows.len() - archived - later;
                 ui.label(RichText::new(format!("{n} session{}", if n == 1 { "" } else { "s" })).size(11.5).color(TEXT_FAINT));
             });
         });
@@ -332,8 +317,20 @@ impl App {
         let mut settings_req: Option<u64> = None;
         let mut archive_req: Option<(u64, bool)> = None;
         let mut toggle_archived = false;
-        // While filtering, matching archived sessions show too.
+        let mut toggle_later = false;
+        let mut later_req: Option<(u64, bool)> = None;
+        let mut move_req: Option<(u64, PathBuf)> = None;
+        // "Move to project" targets: the other projects, in their color.
+        let other_projects: Vec<(String, PathBuf, Option<Color32>)> = self
+            .s
+            .projects
+            .iter()
+            .filter(|p| p.path != project)
+            .map(|p| (p.name.clone(), p.path.clone(), p.accent.map(|[r, g, b]| Color32::from_rgb(r, g, b))))
+            .collect();
+        // While filtering, matching archived / saved-for-later sessions show too.
         let show_archived = self.show_archived || !filter.is_empty();
+        let show_later = self.show_later || !filter.is_empty();
         let today = local_day(now_secs());
         egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
             let mut last_group: Option<String> = None;
@@ -344,18 +341,32 @@ impl App {
                 if !filter.is_empty() && !name.to_lowercase().contains(&filter) && !row.profile.name.to_lowercase().contains(&filter) {
                     continue;
                 }
-                if row.archived && !show_archived {
-                    continue;
-                }
-                let group = if row.archived { "Archived".to_string() } else if row.pin > 0 { "Pinned".to_string() } else if self.s.active_on_top && row.is_active() { "Active".to_string() } else { day_label(today, local_day(row.used)) };
+                let group = if row.archived {
+                    "Archived".to_string()
+                } else if row.later {
+                    "Saved for later".to_string()
+                } else if row.pin > 0 {
+                    "Pinned".to_string()
+                } else if self.s.active_on_top && row.is_active() {
+                    "Active".to_string()
+                } else {
+                    day_label(today, local_day(row.used))
+                };
+                // Saved for later and Archived are collapsible: their header shows either way.
+                let open = if row.archived { show_archived } else if row.later { show_later } else { true };
                 if last_group.as_ref() != Some(&group) {
                     ui.add_space(4.0);
                     if row.archived {
-                        toggle_archived |= archived_header(ui, archived, true);
+                        toggle_archived |= section_header(ui, "ARCHIVED", archived, open);
+                    } else if row.later {
+                        toggle_later |= section_header(ui, "SAVED FOR LATER", later, open);
                     } else {
                         ui.label(RichText::new(group.to_uppercase()).size(10.5).family(bold()).color(TEXT_FAINT));
                     }
                     last_group = Some(group);
+                }
+                if !open {
+                    continue;
                 }
                 let selected = self.active == Some(id);
                 // Rows touch (no item gap), so the pointer is always over exactly one of them;
@@ -370,11 +381,13 @@ impl App {
                     }
                 }
                 let rect = full.shrink2(Vec2::new(0.0, 1.0));
-                // The close button is always registered (drawn only on hover), so the set of
-                // widgets doesn't change with the hover.
+                // The hover buttons (pin; close on running ones) are always registered (drawn only
+                // on hover), so the set of widgets doesn't change with the hover.
                 let br = egui::Rect::from_center_size(egui::pos2(rect.right() - 15.0, rect.center().y), Vec2::splat(22.0));
+                let pr = if row.live { br.translate(Vec2::new(-24.0, 0.0)) } else { br };
                 let close_resp = ui.interact(br, ui.scope_id().with(("close_session", id)), Sense::click());
-                let hovered = resp.hovered() || close_resp.hovered();
+                let pin_resp = ui.interact(pr, ui.scope_id().with(("pin_session", id)), Sense::click());
+                let hovered = resp.hovered() || close_resp.hovered() || pin_resp.hovered();
                 let p = ui.painter();
                 if selected {
                     p.rect_filled(rect, 5.0, Color32::from_rgb(28, 52, 84));
@@ -412,8 +425,10 @@ impl App {
                 // count; the close button on hover), plus a small gap.
                 let small = egui::FontId::proportional(11.5);
                 let text_w = |s: String| ui.fonts_mut(|f| f.layout_no_wrap(s, small.clone(), TEXT_DIM).size().x);
+                let set_aside = row.archived || row.later;
+                let buttons_w = if row.live { 50.0 } else if set_aside { 0.0 } else { 26.0 };
                 let right_w = if hovered {
-                    26.0
+                    buttons_w
                 } else if let Some(label) = status_label(&row) {
                     text_w(label.to_string())
                 } else {
@@ -422,7 +437,7 @@ impl App {
                 let mut job = egui::text::LayoutJob::simple_singleline(name.clone(), font, col);
                 // Nothing on the right: let the name run almost to the row's edge.
                 // The right-hand items end 10 px from the edge (the close button's box 4 px).
-                let reserve = if hovered { 28.0 } else if right_w > 0.0 { right_w + 16.0 } else { 10.0 };
+                let reserve = if hovered { buttons_w + 2.0 } else if right_w > 0.0 { right_w + 16.0 } else { 10.0 };
                 job.wrap.max_width = rect.width() - 34.0 - reserve;
                 job.wrap.max_rows = 1;
                 job.wrap.break_anywhere = true;
@@ -435,19 +450,31 @@ impl App {
                 }
                 let mut x_clicked = false;
                 if hovered {
-                    if close_resp.hovered() {
-                        p.rect_filled(br, 5.0, if close_resp.is_pointer_button_down_on() { Color32::from_rgb(62, 66, 76) } else { CARD_HI });
-                    }
-                    widgets::paint_icon(p, Icon::Close, br.center(), 12.0, if close_resp.hovered() { TEXT } else { TEXT_DIM });
-                    if close_resp.clicked() {
-                        if row.live {
-                            close_req = Some(id);
-                        } else {
-                            delete_req = Some(id);
+                    let hover_bg = |r: &egui::Response, rect: egui::Rect| {
+                        if r.hovered() {
+                            p.rect_filled(rect, 5.0, if r.is_pointer_button_down_on() { Color32::from_rgb(62, 66, 76) } else { CARD_HI });
                         }
-                        x_clicked = true;
+                    };
+                    let pinned = row.pin > 0;
+                    if !set_aside {
+                        hover_bg(&pin_resp, pr);
+                        let pin_col = if pinned { ACCENT_HI } else if pin_resp.hovered() { TEXT } else { TEXT_DIM };
+                        widgets::paint_icon(p, if pinned { Icon::PinFilled } else { Icon::Pin }, pr.center(), 14.0, pin_col);
+                        if pin_resp.clicked() {
+                            pin_req = Some((id, !pinned));
+                            x_clicked = true;
+                        }
+                        pin_resp.on_hover_text(if pinned { "Unpin" } else { "Pin to top" });
                     }
-                    close_resp.on_hover_text(if row.live { "Close: stop it, keep it in the list" } else { "Delete…" });
+                    if row.live {
+                        hover_bg(&close_resp, br);
+                        widgets::paint_icon(p, Icon::Close, br.center(), 12.0, if close_resp.hovered() { TEXT } else { TEXT_DIM });
+                        if close_resp.clicked() {
+                            close_req = Some(id);
+                            x_clicked = true;
+                        }
+                        close_resp.on_hover_text("Close: stop it, keep it in the list");
+                    }
                 } else if let Some(label) = status_label(&row) {
                     p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.5), ACCENT_HI);
                 } else if n > 0 {
@@ -468,6 +495,8 @@ impl App {
                 }
                 let state = if row.archived {
                     "\nArchived — click to resume".to_string()
+                } else if row.later {
+                    "\nSaved for later — click to resume".to_string()
                 } else if !row.live {
                     if row.resumable { "\nNot running — click to resume the conversation".to_string() } else { "\nNot running — click to start".to_string() }
                 } else {
@@ -483,6 +512,7 @@ impl App {
                 let (live, resumable, unrestricted, agent) = (row.live, row.resumable, row.unrestricted, row.profile.is_agent());
                 let pinned = row.pin > 0;
                 let is_archived = row.archived;
+                let is_later = row.later;
                 let tip_name = name.clone();
                 resp.on_hover_ui(|ui| {
                     ui.label(RichText::new(tip_name).family(bold()).color(TEXT));
@@ -494,8 +524,25 @@ impl App {
                         self.rename_focus = true;
                         ui.close();
                     }
-                    if !is_archived && ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
+                    if !is_archived && !is_later && ui.button(if pinned { "Unpin" } else { "Pin to top" }).clicked() {
                         pin_req = Some((id, !pinned));
+                        ui.close();
+                    }
+                    if other_projects.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("Move to project")).on_disabled_hover_text("There's no other project");
+                    } else {
+                        ui.menu_button("Move to project", |ui| {
+                            for (pname, ppath, accent) in &other_projects {
+                                let text = RichText::new(pname).color(accent.unwrap_or(TEXT));
+                                if ui.button(text).on_hover_text(ppath.display().to_string()).clicked() {
+                                    move_req = Some((id, ppath.clone()));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    if ui.button(if is_later { "Back to list" } else { "Save for later" }).on_hover_text(if is_later { "Back into the list" } else { "Set it aside in the Saved for later group (a running one is closed; it stays resumable)" }).clicked() {
+                        later_req = Some((id, !is_later));
                         ui.close();
                     }
                     if ui.button(if is_archived { "Restore to list" } else { "Archive" }).clicked() {
@@ -573,11 +620,7 @@ impl App {
                     }
                 }
             }
-            if archived > 0 && !show_archived {
-                ui.add_space(4.0);
-                toggle_archived |= archived_header(ui, archived, false);
-            }
-            if rows.len() == archived {
+            if rows.len() == archived + later {
                 ui.add_space(10.0);
                 ui.label(RichText::new(if archived > 0 { "No sessions in the list." } else { "No sessions yet." }).color(TEXT_FAINT));
             }
@@ -610,6 +653,16 @@ impl App {
         });
         if toggle_archived && filter.is_empty() {
             self.show_archived = !self.show_archived;
+        }
+        if toggle_later && filter.is_empty() {
+            self.show_later = !self.show_later;
+        }
+        if let Some((id, on)) = later_req {
+            if on {
+                self.save_for_later(id);
+            } else {
+                self.unarchive(id);
+            }
         }
         if let Some((id, on)) = archive_req {
             if on {
@@ -648,6 +701,9 @@ impl App {
                 self.open_launch_dialog(p, pr, Some(id));
             }
         }
+        if let Some((id, to)) = move_req {
+            self.move_session(&ctx, id, to);
+        }
         if let Some(id) = close_req {
             self.request_close(id);
         }
@@ -660,8 +716,9 @@ impl App {
     }
 }
 
-/// The Archived group's header: "ARCHIVED (n)" with an arrow; click to expand / collapse.
-fn archived_header(ui: &mut Ui, n: usize, open: bool) -> bool {
+/// A collapsible group's header (Saved for later, Archived): "TITLE (n)" with an arrow; click
+/// to expand / collapse.
+fn section_header(ui: &mut Ui, title: &str, n: usize, open: bool) -> bool {
     ui.spacing_mut().item_spacing.y = 0.0;
     let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
     let col = if resp.hovered() { TEXT } else { TEXT_FAINT };
@@ -672,6 +729,6 @@ fn archived_header(ui: &mut Ui, n: usize, open: bool) -> bool {
         vec![a.left_top(), egui::pos2(a.right(), a.center().y), a.left_bottom()]
     };
     ui.painter().add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
-    ui.painter().text(egui::pos2(r.left() + 15.0, r.center().y), egui::Align2::LEFT_CENTER, format!("ARCHIVED ({n})"), egui::FontId::new(10.5, bold()), col);
-    resp.on_hover_text(if open { "Hide archived sessions" } else { "Show archived sessions" }).clicked()
+    ui.painter().text(egui::pos2(r.left() + 15.0, r.center().y), egui::Align2::LEFT_CENTER, format!("{title} ({n})"), egui::FontId::new(10.5, bold()), col);
+    resp.on_hover_text(if open { "Collapse" } else { "Expand" }).clicked()
 }

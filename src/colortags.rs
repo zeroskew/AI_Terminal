@@ -1,7 +1,7 @@
-//! Colour tags: Claude Code's markdown has no colour, so AI Terminal renders inline tags the
+//! Color tags: Claude Code's markdown has no color, so AI Terminal renders inline tags the
 //! agent writes:
 //!
-//! - `{red}Failed{/}`, `{green}OK{/green}`, `{#ff8800}warm{/}`: text colour,
+//! - `{red}Failed{/}`, `{green}OK{/green}`, `{#ff8800}warm{/}`: text color,
 //! - `{bg:green}added{/}`, `{bg:#203a20}…{/}`: background behind the text,
 //! - `{row:green}+ line{/}`: background across the whole terminal row (diff-style lines).
 //!
@@ -12,14 +12,14 @@
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TagColor {
-    /// Index into the theme's 16 ANSI colours.
+    /// Index into the theme's 16 ANSI colors.
     Ansi(usize),
     Rgb([u8; 3]),
 }
 
 const NAMED_RGB: [[u8; 3]; 3] = [[0xf0, 0xa0, 0x3c], [0xbe, 0x91, 0xff], [0xff, 0x79, 0xc6]];
 
-/// Background shades for named colours, like Claude Code diffs: a dark
+/// Background shades for named colors, like Claude Code diffs: a dark
 /// tint for whole rows (`{row:red}` = removed line `#3d0100`, `{row:green}` = added line
 /// `#022800`) and a brighter one for spans (`{bg:red}` = changed characters `#5c0200`,
 /// `{bg:green}` `#044700`). `#rrggbb` backgrounds are used as given (None here).
@@ -90,7 +90,7 @@ pub fn named(name: &str) -> Option<TagColor> {
 }
 
 /// The instruction sessions get through `--append-system-prompt`.
-pub const PROMPT: &str = "Your replies are shown in AI Terminal, which renders colour tags in your text (Claude Code's markdown itself has no colour). Text colour: {red}...{/}, {green}...{/}, {yellow}...{/}, {blue}...{/}, {magenta}...{/}, {cyan}...{/}, {orange}...{/}, {purple}...{/}, {pink}...{/}, {gray}...{/}, {white}...{/} or {#rrggbb}...{/}. Background behind text: {bg:green}...{/} (any of those names, or {bg:#rrggbb}). Background across the whole line, e.g. for diff-style lines: {row:green}+ added line{/} and {row:red}- removed line{/}; inside such a line, mark the characters that actually changed with {bg:green}...{/} / {bg:red}...{/} (a brighter shade), like Claude Code's own diff view. Tags nest ({bg:red}{white}text{/}{/}), {/} closes the innermost one, and every tag must close on the same line. Use colour when it helps the reader (status values, pass/fail, warnings, table cells, diffs you show in your reply), not everywhere. Tags do not work inside code blocks or inline code (they are shown literally there), so to show coloured code or a coloured diff, write the lines as plain text (not in a code block). Never put colour tags in commands, file contents or anything you write to disk.";
+pub const PROMPT: &str = "Your replies are shown in AI Terminal, which renders color tags in your text (Claude Code's markdown itself has no color). Text color: {red}...{/}, {green}...{/}, {yellow}...{/}, {blue}...{/}, {magenta}...{/}, {cyan}...{/}, {orange}...{/}, {purple}...{/}, {pink}...{/}, {gray}...{/}, {white}...{/} or {#rrggbb}...{/}. Background behind text: {bg:green}...{/} (any of those names, or {bg:#rrggbb}). Background across the whole line, e.g. for diff-style lines: {row:green}+ added line{/} and {row:red}- removed line{/}; inside such a line, mark the characters that actually changed with {bg:green}...{/} / {bg:red}...{/} (a brighter shade), like Claude Code's own diff view. Tags nest ({bg:red}{white}text{/}{/}), {/} closes the innermost one, and every tag must close on the same line. Use color when it helps the reader (status values, pass/fail, warnings, table cells, diffs you show in your reply), not everywhere. Tags do not work inside code blocks or inline code (they are shown literally there), so to show colored code or a colored diff, write the lines as plain text (not in a code block). Never put color tags in commands, file contents or anything you write to disk.";
 
 #[derive(Clone, Copy)]
 enum Tok {
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn colours_and_keeps_table_borders() {
+    fn colors_and_keeps_table_borders() {
         let src = "│ {green}OK{/}     │ next";
         let (t, s, _) = render(src);
         assert_eq!(t, "│ OK               │ next");

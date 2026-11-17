@@ -90,7 +90,7 @@ impl Cmd {
             Cmd::FontReset => "Terminal font default size",
             Cmd::TogglePreviews => "Inline image previews on / off",
             Cmd::Options => "Options",
-            Cmd::Plugins => "Claude Code plugins",
+            Cmd::Plugins => "Plugins",
             Cmd::Find => "Find in terminal",
             Cmd::Snippets => "Insert a snippet",
             Cmd::Scripts => "Run a script",

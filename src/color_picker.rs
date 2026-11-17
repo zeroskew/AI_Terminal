@@ -1,4 +1,4 @@
-//! A colour picker in the style of a DCC tool: a hue/saturation wheel with saturation and value
+//! A color picker in the style of a DCC tool: a hue/saturation wheel with saturation and value
 //! bars, new/old swatches, RGB and HSV sliders with numeric fields, and a hex field.
 //!
 //! HSV here is plain sRGB-space HSV (what hex codes and other tools use), not egui's linear Hsva.
@@ -16,7 +16,7 @@ struct State {
     h: f32,
     s: f32,
     v: f32,
-    /// The colour the picker was opened with (shown as "Old", restored by Cancel).
+    /// The color the picker was opened with (shown as "Old", restored by Cancel).
     orig: Rgb,
 }
 
@@ -87,7 +87,7 @@ fn parse_hex(s: &str) -> Option<Rgb> {
 }
 
 /// Bring the stored HSV in line with `c` if it was changed from outside. Hue (and saturation, for
-/// black) is kept when the colour doesn't determine it, so dragging to grey and back keeps the hue.
+/// black) is kept when the color doesn't determine it, so dragging to grey and back keeps the hue.
 fn sync(st: &mut State, c: Rgb) {
     if hsv_to_rgb(st.h, st.s, st.v) == c {
         return;
@@ -104,7 +104,7 @@ fn sync(st: &mut State, c: Rgb) {
 
 /// A swatch button that opens the full picker in a draggable window (one at a time), opened beside
 /// the swatch. Edits apply live; Cancel, Escape or the close button restore
-/// the colour it was opened with. The response is marked changed on any edit.
+/// the color it was opened with. The response is marked changed on any edit.
 pub fn color_button(ui: &mut Ui, c: &mut Rgb) -> Response {
     let my_id = ui.auto_id_with("color_picker_button");
     let win_id = Id::NULL.with("color_picker_window");
@@ -142,7 +142,7 @@ pub fn color_button(ui: &mut Ui, c: &mut Rgb) -> Response {
     // On opening, place the window beside the swatch (right of it, or left if there's no room),
     // kept on screen; after that it stays wherever the user drags it.
     let place = ui.data_mut(|d| d.remove_temp::<bool>(win_id.with("place"))).unwrap_or(false);
-    let mut window = egui::Window::new("Colour Picker");
+    let mut window = egui::Window::new("Color Picker");
     if place {
         let screen = ui.ctx().content_rect();
         let size = ui.memory(|m| m.area_rect(win_id)).map(|r| r.size()).unwrap_or(Vec2::new(430.0, 470.0));
@@ -198,7 +198,7 @@ pub fn color_button(ui: &mut Ui, c: &mut Rgb) -> Response {
 }
 
 /// The picker panel itself, for embedding inline. `show_old` adds the "Old" swatch under "New"
-/// (clicking it restores that colour). Returns true when the colour changed.
+/// (clicking it restores that color). Returns true when the color changed.
 pub fn panel(ui: &mut Ui, id: Id, c: &mut Rgb, show_old: bool) -> bool {
     let mut st = ui.data(|d| d.get_temp::<State>(id)).unwrap_or_else(|| {
         let (h, s, v) = rgb_to_hsv(*c);
@@ -230,7 +230,7 @@ pub fn panel(ui: &mut Ui, id: Id, c: &mut Rgb, show_old: bool) -> bool {
             if show_old {
                 ui.add_space(2.0);
                 ui.label(RichText::new("Old").size(11.5).color(TEXT_DIM));
-                if swatch(ui, Vec2::new(w, 42.0), rgb(st.orig)).on_hover_text("Click to go back to this colour").clicked() {
+                if swatch(ui, Vec2::new(w, 42.0), rgb(st.orig)).on_hover_text("Click to go back to this color").clicked() {
                     rgb_edit = Some(st.orig);
                 }
             }
@@ -301,7 +301,7 @@ pub fn panel(ui: &mut Ui, id: Id, c: &mut Rgb, show_old: bool) -> bool {
     *c != before
 }
 
-/// A plain colour swatch with a hairline border; clickable.
+/// A plain color swatch with a hairline border; clickable.
 fn swatch(ui: &mut Ui, size: Vec2, col: Color32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     ui.painter().rect_filled(rect, 4.0, col);
@@ -309,7 +309,7 @@ fn swatch(ui: &mut Ui, size: Vec2, col: Color32) -> Response {
     resp
 }
 
-/// The hex text field. Keeps the user's partial text while focused; returns a parsed colour when
+/// The hex text field. Keeps the user's partial text while focused; returns a parsed color when
 /// the text is a valid 3- or 6-digit hex code.
 fn hex_field(ui: &mut Ui, id: Id, cur: Rgb, width: f32) -> Option<Rgb> {
     let edit_id = id.with("hex");
@@ -436,7 +436,7 @@ fn wheel(ui: &mut Ui, d: f32, st: &mut State) -> bool {
         }
     }
     p.add(Shape::mesh(mesh));
-    // Soften the polygon edge with a thin ring in the panel colour, then a hairline.
+    // Soften the polygon edge with a thin ring in the panel color, then a hairline.
     p.circle_stroke(c, r + 1.0, Stroke::new(2.0, ui.visuals().window_fill));
     p.circle_stroke(c, r + 1.5, Stroke::new(1.0, Color32::from_black_alpha(120)));
     // The marker.

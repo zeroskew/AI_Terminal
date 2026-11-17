@@ -2,7 +2,7 @@
 //!
 //! `ViewportCommand::SetTheme(Dark)` alone doesn't stick on machines where apps use the light
 //! theme: winit re-applies the system theme shortly after start. So we also set the caption and
-//! caption-text colours directly through DWM (Windows 11), which winit never touches.
+//! caption-text colors directly through DWM (Windows 11), which winit never touches.
 
 #[cfg(windows)]
 mod imp {
@@ -47,7 +47,7 @@ mod imp {
         }
     }
 
-    /// Applies dark caption colours to this process's main window. Returns false until the
+    /// Applies dark caption colors to this process's main window. Returns false until the
     /// window exists (call again on a later frame).
     pub fn apply() -> bool {
         let mut s = Search { pid: std::process::id(), found: Vec::new() };
@@ -55,7 +55,7 @@ mod imp {
             EnumWindows(cb, &mut s as *mut Search as isize);
         }
         for &h in &s.found {
-            // COLORREF is 0x00BBGGRR; matches the app's panel colour.
+            // COLORREF is 0x00BBGGRR; matches the app's panel color.
             let caption: u32 = 0x00272221;
             let text: u32 = 0x00DCDCDC;
             let dark: i32 = 1;

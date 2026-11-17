@@ -96,18 +96,26 @@ impl App {
         let clamp = |o: Vec2| Vec2::new(o.x.clamp(-max_x, max_x), o.y.clamp(-max_y_up, max_y_down));
         self.options_offset = clamp(self.options_offset);
         let id = egui::Id::unique("options");
-        let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, self.options_offset);
+        // `constrain(false)`: our own clamp above decides how far off screen the window may go.
+        // With egui's default constraint on top, a drag past the screen edge built up offset that
+        // egui hid, so dragging back seemed stuck until that hidden excess was used up.
+        let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, self.options_offset).constrain(false);
         let mut drag_delta = Vec2::ZERO;
         let m = egui::Modal::new(id).area(area).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(0)).show(ctx, |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
-            // Drag strip along the top edge. Registered before the other widgets so the close
-            // button (and anything else placed over it) still gets its clicks.
-            let strip = egui::Rect::from_min_size(ui.max_rect().min, Vec2::new(size.x, 44.0));
-            let drag = ui.interact(strip, id.with("drag"), Sense::drag());
+            // Drag bar. Only the visible bar drags: it spans the content column, left of the close button
+            // (which sits 10 px from the top and right edges, 28 px square).
+            let top = ui.max_rect().min;
+            let bar = egui::Rect::from_min_max(egui::pos2(top.x + 191.0 + 10.0, top.y + 10.0), egui::pos2(top.x + size.x - 48.0, top.y + 38.0));
+            let drag = ui.interact(bar, id.with("drag"), Sense::drag());
             if drag.dragged() {
                 drag_delta = drag.drag_delta();
             }
+            let active = drag.dragged() || drag.hovered();
+            ui.painter().rect_filled(bar, 6.0, if active { BORDER } else { CARD });
+            let grip = egui::Rect::from_center_size(bar.center(), Vec2::new(40.0, 4.0));
+            ui.painter().rect_filled(grip, 2.0, if active { TEXT_DIM } else { TEXT_FAINT });
             if drag.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             } else if drag.hovered() {
@@ -246,7 +254,7 @@ impl App {
         ui.add_space(2.0);
     }
 
-    /// One colour setting: label, swatch with a picker, and an editable hex value.
+    /// One color setting: label, swatch with a picker, and an editable hex value.
     pub(super) fn color_row(ui: &mut Ui, hex_edit: &mut std::collections::HashMap<String, String>, label: &str, v: &mut term_theme::Rgb) {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -372,13 +380,13 @@ impl App {
             p.rect_filled(egui::Rect::from_min_size(egui::pos2(sel.right() + 8.0, y0 + 40.0), Vec2::new(9.0, 19.0)), 1.0, term_theme::c(t.cursor));
         });
 
-        Self::opt_heading(ui, "COLOUR TAGS");
+        Self::opt_heading(ui, "COLOR TAGS");
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.vertical(|ui| {
-                ui.checkbox(&mut self.s.color_tags, "Show colour tags in replies as coloured text: {green}OK{/}, {red}Failed{/}, {#ff8800}…{/}");
+                ui.checkbox(&mut self.s.color_tags, "Show color tags in replies as colored text: {green}OK{/}, {red}Failed{/}, {#ff8800}…{/}");
                 ui.add_enabled(self.s.color_tags, egui::Checkbox::new(&mut self.s.color_tag_prompt, "Tell Claude about them in new / resumed sessions (--append-system-prompt)"));
-                ui.label(RichText::new("Claude Code's markdown has no text colour, so the agent writes tags and AI Terminal colours them. Other terminals would show the tags as text.").size(12.0).color(TEXT_FAINT));
+                ui.label(RichText::new("Claude Code's markdown has no text color, so the agent writes tags and AI Terminal colors them. Other terminals would show the tags as text.").size(12.0).color(TEXT_FAINT));
             });
         });
 
@@ -445,7 +453,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.add_space(16.0);
                 Self::opt_label(ui, "");
-                ui.add_enabled(has, egui::Checkbox::new(&mut theme.bg_color_override, "Override the core Background colour behind the image"));
+                ui.add_enabled(has, egui::Checkbox::new(&mut theme.bg_color_override, "Override the core Background color behind the image"));
             });
             ui.add_enabled_ui(has && theme.bg_color_override, |ui| {
                 Self::color_row(ui, &mut self.hex_edit, "Image background", &mut theme.bg_color);
@@ -652,7 +660,7 @@ impl App {
             ui.add(egui::DragValue::new(&mut self.s.keep_sessions).range(0..=500).speed(0.2));
             ui.label("sessions per project in the list");
         });
-        ui.label(RichText::new("Older ones move to the Archived group at the bottom of the list (still resumable; right-click > Restore to list brings one back). Running and pinned sessions are never archived. 0 = keep all.").size(12.0).color(TEXT_FAINT));
+        ui.label(RichText::new("Older ones move to the Archived group at the bottom of the list (still resumable; right-click > Restore to list brings one back). Running, pinned and Saved for later sessions are never archived. 0 = keep all.").size(12.0).color(TEXT_FAINT));
         ui.checkbox(&mut self.s.active_on_top, "Move running sessions to the top of the list");
         ui.label(RichText::new("They show in an Active group below Pinned; a session drops back to its day once it's closed or exits.").size(12.0).color(TEXT_FAINT));
         ui.checkbox(&mut self.s.name_sessions, "Ask agents to name new sessions after their first task");
@@ -711,7 +719,7 @@ impl App {
             ui.label(RichText::new("Dima Polyakov").size(15.0).family(bold()).color(Color32::from_rgb(235, 200, 90)));
         });
         ui.add_space(12.0);
-        ui.label(RichText::new("Projects with Claude / Codex / shell sessions, pasted images previewed right in the terminal, colour emoji, colour tags in Claude's replies, and sessions that resume their conversation.").size(14.5).color(TEXT));
+        ui.label(RichText::new("Projects with Claude / Codex / shell sessions, pasted images previewed right in the terminal, color emoji, color tags in Claude's replies, and sessions that resume their conversation.").size(14.5).color(TEXT));
         ui.add_space(8.0);
         let days = match self.s.paste_keep_days {
             0 => "with no age limit".to_string(),

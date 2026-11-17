@@ -29,6 +29,7 @@ struct SessInfo {
     profile: Profile,
     live: bool,
     archived: bool,
+    later: bool,
 }
 
 /// Matches shown per session until "show all" is clicked.
@@ -82,10 +83,10 @@ impl App {
 
     fn session_by_agent(&self, agent_id: &str) -> Option<SessInfo> {
         if let Some(t) = self.tabs.iter().find(|t| t.sess.agent_id.as_deref() == Some(agent_id)) {
-            return Some(SessInfo { name: t.sess.display_name(), project: t.project.clone(), profile: t.sess.profile.clone(), live: t.sess.exited.is_none(), archived: false });
+            return Some(SessInfo { name: t.sess.display_name(), project: t.project.clone(), profile: t.sess.profile.clone(), live: t.sess.exited.is_none(), archived: false, later: false });
         }
         let d = self.dormant.iter().find(|d| d.saved.agent_id.as_deref() == Some(agent_id))?;
-        Some(SessInfo { name: d.display_name(), project: d.saved.project.clone(), profile: d.saved.profile.clone(), live: false, archived: d.saved.archived })
+        Some(SessInfo { name: d.display_name(), project: d.saved.project.clone(), profile: d.saved.profile.clone(), live: false, archived: d.saved.archived, later: d.saved.later })
     }
 
     /// The active session's conversation, when it has one to search.
@@ -260,7 +261,7 @@ impl App {
                         let info = self.session_by_agent(&f.agent_id);
                         let (name, project, icon, state) = match &info {
                             Some(i) => {
-                                let state = if i.live { "running" } else if i.archived { "archived" } else { "" };
+                                let state = if i.live { "running" } else if i.archived { "archived" } else if i.later { "saved for later" } else { "" };
                                 (i.name.clone(), self.s.projects.iter().find(|p| p.path == i.project).map(|p| p.name.clone()).unwrap_or_else(|| project_name(&i.project)), agent_icon(&i.profile), state)
                             }
                             None => (f.agent_id.clone(), String::new(), (Icon::Prompt, TEXT_FAINT), ""),

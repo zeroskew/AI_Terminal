@@ -37,7 +37,7 @@ pub struct ViewOptions<'a> {
     /// Inline previews may cover the end of long lines (else they only go where there is room).
     pub preview_over_text: bool,
     pub shift_enter_alt: bool,
-    /// Render {red}…{/} colour tags (see colortags.rs).
+    /// Render {red}…{/} color tags (see colortags.rs).
     pub color_tags: bool,
 }
 
@@ -92,14 +92,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
     let id = ui.scope_id().with(("terminal", s.id));
     let resp = ui.interact(full, id, Sense::click_and_drag());
     ui.painter().rect_filled(full, 0.0, term_bg);
-    // Optional background image, laid out per the chosen fit, at the chosen opacity.
-    if let Some(img) = opt.theme.active_bg_image().filter(|p| cache.exists(p)) {
-        if let Slot::Ready { size, .. } = cache.get(ui.ctx(), img) {
-            let size = *size;
-            let tint = Color32::from_white_alpha((opt.theme.bg_opacity.clamp(0.0, 1.0) * 255.0) as u8);
-            paint_bg_image(&ui.painter().with_clip_rect(full), cache, img, size, full, opt.theme.bg_fit, opt.theme.bg_blur, tint);
-        }
-    }
+    paint_theme_bg_image(ui, cache, opt.theme, full);
     if want_focus || resp.clicked() || resp.drag_started() || resp.secondary_clicked() {
         resp.request_focus();
     }
@@ -342,7 +335,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
         (grid, wrapped, cursor, content.display_offset, t.grid().history_size())
     };
 
-    // Colour tags in the agent's text ({green}OK{/}); not on the row being typed.
+    // Color tags in the agent's text ({green}OK{/}); not on the row being typed.
     if opt.color_tags {
         let cursor_row = cursor.map(|c| c.0);
         for (r, row) in grid.iter_mut().enumerate() {
@@ -418,7 +411,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
                 }
             }
         }
-        // Text: ASCII runs of one colour go out as one string; anything else is placed in its
+        // Text: ASCII runs of one color go out as one string; anything else is placed in its
         // own cell, so fallback-font glyphs with a different advance can't push the rest.
         let mut c = 0;
         while c < cols {
@@ -440,33 +433,49 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
             if cell.c.is_ascii() && cell.extra.is_none() {
                 let start = c;
                 let mut text = String::new();
+                // egui shapes text with the font's default ligatures, so "..", "->", "==" and
+                // the like in a code font turn into ligature glyphs that ignore the cell grid
+                // (and change as more characters are typed). Punctuation is drawn one character
+                // at a time instead, leaving a space in the run so nothing can combine.
+                let mut punct: Vec<(usize, char)> = Vec::new();
                 while c < cols {
                     let n = &row[c];
                     if !(n.c.is_ascii() && n.extra.is_none() && n.fg == cell.fg && (n.flags & (Flags::ITALIC | Flags::ALL_UNDERLINES | Flags::STRIKEOUT)) == (cell.flags & (Flags::ITALIC | Flags::ALL_UNDERLINES | Flags::STRIKEOUT))) || is_box(n.c) {
                         break;
                     }
-                    text.push(if n.c == '\0' { ' ' } else { n.c });
+                    if n.c.is_ascii_punctuation() {
+                        punct.push((c, n.c));
+                        text.push(' ');
+                    } else {
+                        text.push(if n.c == '\0' { ' ' } else { n.c });
+                    }
                     c += 1;
                 }
-                let trimmed = text.trim_end();
-                if !trimmed.is_empty() {
-                    // egui snaps a galley's origin to a whole pixel but places its glyphs at
-                    // fractional advances, so a run started mid-row can land a pixel off from
-                    // the same text drawn as part of a longer run. Anchoring every run at the
-                    // row start (padded with spaces) keeps each glyph's x independent of how
-                    // the row happens to split into runs, so text doesn't jitter as it redraws.
-                    let padded = format!("{:start$}{trimmed}", "");
-                    let (x, trimmed) = (origin.x, padded.as_str());
-                    let ty = y + (ch - opt.font_size * 1.25).max(0.0) / 2.0;
-                    let bold = cell.flags.contains(Flags::BOLD);
+                // egui snaps a galley's origin to a whole pixel but places its glyphs at
+                // fractional advances, so a run started mid-row can land a pixel off from
+                // the same text drawn as part of a longer run. Anchoring every run at the
+                // row start (padded with spaces) keeps each glyph's x independent of how
+                // the row happens to split into runs, so text doesn't jitter as it redraws.
+                let ty = y + (ch - opt.font_size * 1.25).max(0.0) / 2.0;
+                let bold = cell.flags.contains(Flags::BOLD);
+                let draw = |col: usize, s: &str| {
+                    let padded = format!("{:col$}{s}", "");
+                    let x = origin.x;
                     if bold && has_code_bold() {
-                        painter.text(Pos2::new(x, ty), egui::Align2::LEFT_TOP, trimmed, bold_font.clone(), cell.fg);
+                        painter.text(Pos2::new(x, ty), egui::Align2::LEFT_TOP, &padded, bold_font.clone(), cell.fg);
                     } else {
-                        painter.text(Pos2::new(x, ty), egui::Align2::LEFT_TOP, trimmed, font.clone(), cell.fg);
+                        painter.text(Pos2::new(x, ty), egui::Align2::LEFT_TOP, &padded, font.clone(), cell.fg);
                         if bold {
-                            painter.text(Pos2::new(x + 0.6, ty), egui::Align2::LEFT_TOP, trimmed, font.clone(), cell.fg);
+                            painter.text(Pos2::new(x + 0.6, ty), egui::Align2::LEFT_TOP, &padded, font.clone(), cell.fg);
                         }
                     }
+                };
+                let trimmed = text.trim_end();
+                if !trimmed.trim_start().is_empty() {
+                    draw(start, trimmed);
+                }
+                for (col, p) in punct {
+                    draw(col, p.encode_utf8(&mut [0u8; 4]));
                 }
                 decorate(&painter, cell, cell_rect(r, start, c - start));
                 continue;
@@ -477,7 +486,7 @@ pub fn show(ui: &mut Ui, s: &mut Session, st: &mut ViewState, cache: &mut ImageC
                 g.extend(z.iter());
             }
             let rect = cell_rect(r, c, w);
-            // Colour emoji (🟢 ✅ …) are drawn from a Direct2D rendering of Segoe UI Emoji,
+            // Color emoji (🟢 ✅ …) are drawn from a Direct2D rendering of Segoe UI Emoji,
             // since egui only has monochrome outlines.
             if crate::emoji::is_emoji(cell.c, cell.extra.as_deref()) {
                 let ppp = ui.ctx().pixels_per_point();
@@ -820,6 +829,18 @@ impl Search {
         self.open = true;
         self.focus = true;
     }
+}
+
+/// Paints the theme's background image (if any, and loaded) into `full`, laid out per the
+/// chosen fit, at the chosen opacity. Returns whether an image is active for this theme.
+pub fn paint_theme_bg_image(ui: &Ui, cache: &mut ImageCache, theme: &crate::term_theme::TermTheme, full: Rect) -> bool {
+    let Some(img) = theme.active_bg_image().filter(|p| cache.exists(p)) else { return false };
+    if let Slot::Ready { size, .. } = cache.get(ui.ctx(), img) {
+        let size = *size;
+        let tint = Color32::from_white_alpha((theme.bg_opacity.clamp(0.0, 1.0) * 255.0) as u8);
+        paint_bg_image(&ui.painter().with_clip_rect(full), cache, img, size, full, theme.bg_fit, theme.bg_blur, tint);
+    }
+    true
 }
 
 /// Paints the terminal background image into `full` (the painter clips to it).

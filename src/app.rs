@@ -27,6 +27,8 @@ mod mcp_api;
 mod launch;
 mod model_switch;
 mod session_close;
+mod session_move;
+mod project_settings;
 mod context_info;
 mod mcp_servers_ui;
 mod sidebar;
@@ -46,9 +48,16 @@ pub struct Project {
     /// clears this (the project, its sessions and its settings stay).
     #[serde(default = "yes")]
     pub in_tabs: bool,
-    /// Optional accent colour (sRGB) that tints the project's tab and its Home card.
+    /// Optional accent color (sRGB) that tints the project's tab and its Home card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<[u8; 3]>,
+    /// Optional custom image (a copy under %APPDATA%\AI Terminal\project_images) shown in place
+    /// of the folder icon on the Home card, the tab and the empty project page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<PathBuf>,
+    /// The project's own terminal background, overriding Options > Terminal when enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<term_theme::ProjectBg>,
 }
 
 impl Project {
@@ -87,6 +96,9 @@ pub struct SavedSession {
     /// Moved to the Archived group (hidden from the list until expanded).
     #[serde(default)]
     pub archived: bool,
+    /// Set aside in the Saved for later group (hidden until expanded; never auto-archived).
+    #[serde(default)]
+    pub later: bool,
     /// Unix seconds when it was last used (a line submitted; 0 = unknown: `created` is used).
     /// Orders the sidebar and decides which sessions the "keep the last N" limit archives.
     #[serde(default)]
@@ -134,6 +146,8 @@ struct Row {
     pin: u32,
     /// In the Archived group.
     archived: bool,
+    /// In the Saved for later group.
+    later: bool,
 }
 
 impl Row {
@@ -259,7 +273,7 @@ pub struct Settings {
     /// The other agents' last "with settings" values, by kind.
     pub last_agent_opts: std::collections::HashMap<String, LaunchOpts>,
     pub cli_history: Vec<String>,
-    /// Render {red}…{/} colour tags in the terminal.
+    /// Render {red}…{/} color tags in the terminal.
     pub color_tags: bool,
     /// Tell Claude about the tags (`--append-system-prompt`) in sessions started here.
     pub color_tag_prompt: bool,
@@ -462,9 +476,16 @@ enum PluginFilter {
     Installed,
 }
 
-/// State of the Claude Code plugins window.
+/// State of the plugins window.
 #[derive(Default)]
 struct PluginsUi {
+    /// The provider whose plugins are shown (Claude or Codex, the vertical tabs).
+    agent: Kind,
+    /// Load the current provider's plugins on the next frame (set on open / tab switch).
+    needs_load: bool,
+    /// A Codex load running in the background, and the last load error.
+    loading: Option<plugins::LoadRef>,
+    load_error: Option<String>,
     catalogue: Vec<plugins::Plugin>,
     installed: std::collections::HashMap<String, Vec<plugins::Installed>>,
     filter: PluginFilter,
@@ -523,7 +544,7 @@ pub struct App {
     /// The rename box takes the keyboard once, when it opens (asking every frame kept it from
     /// ever losing focus, so Enter / clicking away never finished the rename).
     rename_focus: bool,
-    renaming_project: Option<(PathBuf, String)>,
+    project_settings: Option<project_settings::ProjectDraft>,
     /// Each project's GitHub page (None = not on GitHub), with when it was read from the git config.
     github_pages: std::collections::HashMap<PathBuf, (std::time::Instant, Option<String>)>,
     /// The session last shown in each project (restored when its tab is selected again).
@@ -570,6 +591,9 @@ pub struct App {
     mcp: Option<mcp::Server>,
     last_title: String,
     drag_project: Option<PathBuf>,
+    /// The filter typed in the project tabs' "»" menu, and whether it should take focus.
+    tab_menu_filter: String,
+    tab_menu_focus: bool,
     drag_session: Option<u64>,
     snippets_open: bool,
     snippet_filter: String,
@@ -610,10 +634,12 @@ pub struct App {
     /// Claude conversations from other apps, scanned in the background at start-up and merged
     /// into the list once ready.
     found_claude: std::sync::Arc<std::sync::Mutex<Option<Vec<agents::FoundClaude>>>>,
-    /// Hex fields being edited in Options (keyed by colour name).
+    /// Hex fields being edited in Options (keyed by color name).
     hex_edit: std::collections::HashMap<String, String>,
     /// The sidebar's Archived group is expanded.
     show_archived: bool,
+    /// The sidebar's Saved for later group is expanded.
+    show_later: bool,
     /// Test hook (`--new-menu`): open the New session ▼ menu on the next frame.
     open_new_menu: bool,
     /// The Search window (open while Some).
@@ -680,7 +706,7 @@ impl App {
         crate::hooks::watch(cc.egui_ctx.clone());
         if s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None });
+            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None });
         }
         images::cleanup_async(s.paste_keep_days, s.paste_limit_bytes());
         let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
@@ -702,7 +728,7 @@ impl App {
             viewer: None,
             renaming: None,
             rename_focus: false,
-            renaming_project: None,
+            project_settings: None,
             github_pages: Default::default(),
             remembered: Default::default(),
             filter: String::new(),
@@ -733,6 +759,8 @@ impl App {
             mcp: None,
             last_title: String::new(),
             drag_project: None,
+            tab_menu_filter: String::new(),
+            tab_menu_focus: false,
             drag_session: None,
             snippets_open: false,
             snippet_filter: String::new(),
@@ -761,6 +789,7 @@ impl App {
             found_claude: Default::default(),
             hex_edit: Default::default(),
             show_archived: false,
+            show_later: false,
             open_new_menu: std::env::args().any(|a| a == "--new-menu"),
             search_ui: None,
             update_dialog: std::env::args().any(|a| a == "--check-updates"),
@@ -841,7 +870,7 @@ impl App {
             if w[0] == "--add-project" {
                 let dir = PathBuf::from(&w[1]);
                 if !app.s.projects.iter().any(|p| p.path == dir) {
-                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None });
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None });
                 }
                 app.s.selected_project = Some(dir);
             }
@@ -1267,6 +1296,7 @@ impl App {
             cost: t.sess.cost.map(|c| c.usd),
             pin: t.pin,
             archived: false,
+            later: false,
             used: t.sess.used.max(t.created),
         };
         crate::dlog!("auto-close #{id} ({why}): {}", t.sess.display_name());
@@ -1447,7 +1477,7 @@ impl App {
     fn add_project(&mut self, ctx: &egui::Context) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Add project folder").pick_folder() {
             if !self.s.projects.iter().any(|p| p.path == dir) {
-                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None });
+                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None });
             }
             let _ = ctx;
             self.select_project(Some(dir));
@@ -1472,6 +1502,7 @@ impl eframe::App for App {
                 cost: t.sess.cost.map(|c| c.usd),
                 pin: t.pin,
                 archived: false,
+                later: false,
                 used: t.sess.used.max(t.created),
             })
             .collect();
@@ -1544,7 +1575,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.renaming_project.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.project_settings.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1569,10 +1600,13 @@ impl eframe::App for App {
         }
 
         let mut actions = Vec::new();
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(term_theme::c(self.s.term_theme.effective_background()))).show(ui, |ui| {
-            let theme = self.s.term_theme.clone();
+        // The project's own background (Project settings) replaces the global one when set.
+        let bg_project = self.tabs.iter().find(|t| Some(t.sess.id) == self.active).map(|t| t.project.clone()).unwrap_or_else(|| self.current_project());
+        let project_bg = if home { None } else { self.s.projects.iter().find(|p| p.path == bg_project).and_then(|p| p.background.clone()) };
+        let theme = self.s.term_theme.with_project_bg(project_bg.as_ref());
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(term_theme::c(theme.effective_background()))).show(ui, |ui| {
             let opt = ViewOptions { font_size: self.s.font_size, theme: &theme, inline_previews: self.s.inline_previews, preview_max_px: self.s.preview_max_px, preview_over_text: self.s.preview_over_text, shift_enter_alt: self.s.shift_enter_alt, color_tags: self.s.color_tags };
-            let focus = std::mem::take(&mut self.focus_terminal) && !modal_open && self.renaming.is_none() && self.renaming_project.is_none();
+            let focus = std::mem::take(&mut self.focus_terminal) && !modal_open && self.renaming.is_none() && self.project_settings.is_none();
             let a = self.active;
             if home {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, BG);
@@ -1580,7 +1614,7 @@ impl eframe::App for App {
             } else if let Some(tab) = self.tabs.iter_mut().find(|t| Some(t.sess.id) == a) {
                 actions = view::show(ui, &mut tab.sess, &mut tab.view, &mut self.cache, &opt, focus);
             } else {
-                self.empty_project(ui);
+                self.empty_project(ui, &theme);
             }
             // Drop hint.
             if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
@@ -1631,6 +1665,7 @@ impl eframe::App for App {
         self.confirm_close_dialog(&ctx);
         self.context_info_dialog(&ctx);
         self.remove_project_dialog(&ctx);
+        self.project_settings_dialog(&ctx);
         self.quit_dialog(&ctx);
         self.update_dialog(&ctx);
         self.show_toast(&ctx);

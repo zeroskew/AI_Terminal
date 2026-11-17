@@ -54,7 +54,7 @@ impl EventListener for Listener {
             Event::ClipboardStore(_, text) => s.clipboard = Some(text),
             Event::PtyWrite(text) => s.pty_writes.push(text),
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
-            // Colour / size queries are answered with defaults by the emulator itself
+            // Color / size queries are answered with defaults by the emulator itself
             // when unhandled; clipboard reads (OSC 52 load) are refused.
             Event::ClipboardLoad(..) | Event::ColorRequest(..) | Event::TextAreaSizeRequest(_) => {}
         }
@@ -482,7 +482,7 @@ impl Session {
         }
     }
 
-    /// Hash of the text on the live screen (ignoring scrollback position, colours and cursor).
+    /// Hash of the text on the live screen (ignoring scrollback position, colors and cursor).
     pub fn screen_hash(&self) -> u64 {
         use alacritty_terminal::index::{Column, Line};
         use std::hash::{Hash, Hasher};

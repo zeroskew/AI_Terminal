@@ -152,11 +152,10 @@ impl App {
             self.session_links(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.update_notice(ui);
-                ui.label(RichText::new("Ctrl+V pastes images  ·  Ctrl+N new Claude session  ·  Ctrl+Tab switch").color(TEXT_DIM).size(12.5));
                 if let Some(t) = self.active_tab() {
                     let n = t.sess.pasted_images.len();
                     if n > 0 {
-                        ui.label(RichText::new(format!("{n} image{} pasted   ", if n == 1 { "" } else { "s" })).color(TEXT_DIM).size(12.5));
+                        ui.label(RichText::new(format!("{n} image{} pasted", if n == 1 { "" } else { "s" })).color(TEXT_DIM).size(12.5));
                     }
                 }
             });

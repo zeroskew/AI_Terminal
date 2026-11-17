@@ -34,10 +34,14 @@ pub enum Icon {
     Search,
     /// GitHub: its cat mark, the cat filled inside a ring.
     GitHub,
+    /// A push pin, tilted, outlined.
+    Pin,
+    /// A push pin, tilted, filled (pinned).
+    PinFilled,
 }
 
 /// Fills a logo given as convex pieces in -1..1 coordinates, scaled by `h` around `c`. A hairline
-/// stroke in the fill colour hides the anti-aliasing seams between neighbouring pieces.
+/// stroke in the fill color hides the anti-aliasing seams between neighbouring pieces.
 fn fill_pieces(p: &egui::Painter, c: Pos2, h: f32, pieces: &[&[(f32, f32)]], fill: Color32) {
     for piece in pieces {
         let pts = piece.iter().map(|&(x, y)| c + Vec2::new(x, y) * h).collect();
@@ -78,6 +82,28 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             p.add(Shape::line(vec![body.left_top(), body.left_bottom(), body.right_bottom(), body.right_top()], st));
             p.rect_filled(Rect::from_min_max(Pos2::new(c.x - h * 0.18, c.y + h * 0.2), Pos2::new(c.x + h * 0.18, c.y + h * 0.75)), 1.0, col);
         }
+        Icon::Pin | Icon::PinFilled => {
+            // Drawn upright in -1..1 units, turned 45° so the needle points down-left.
+            let (sn, cs) = std::f32::consts::FRAC_PI_4.sin_cos();
+            let at = |x: f32, y: f32| c + Vec2::new(x * cs - y * sn, x * sn + y * cs) * h + Vec2::new(h * 0.12, -h * 0.12);
+            let st = Stroke::new(1.4, col);
+            // Head, body (narrowing towards the head) and the wide collar above the needle.
+            let head = vec![at(-0.34, -0.92), at(0.34, -0.92), at(0.34, -0.7), at(-0.34, -0.7)];
+            let body = vec![at(-0.2, -0.7), at(0.2, -0.7), at(0.26, -0.02), at(-0.26, -0.02)];
+            let collar = vec![at(-0.58, -0.02), at(0.58, -0.02), at(0.58, 0.16), at(-0.58, 0.16)];
+            if icon == Icon::PinFilled {
+                for s in [head, body, collar] {
+                    p.add(Shape::convex_polygon(s, col, Stroke::new(0.6, col)));
+                }
+            } else {
+                let outline = vec![
+                    at(-0.34, -0.92), at(0.34, -0.92), at(0.34, -0.7), at(0.2, -0.7), at(0.26, -0.02), at(0.58, -0.02),
+                    at(0.58, 0.16), at(-0.58, 0.16), at(-0.58, -0.02), at(-0.26, -0.02), at(-0.2, -0.7), at(-0.34, -0.7),
+                ];
+                p.add(Shape::closed_line(outline, st));
+            }
+            p.line_segment([at(0.0, 0.16), at(0.0, 0.95)], Stroke::new(1.5, col));
+        }
         Icon::Search => {
             let lc = c + Vec2::new(-h * 0.18, -h * 0.18);
             p.circle_stroke(lc, h * 0.52, st);
@@ -97,11 +123,23 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             p.circle_stroke(c, h * 0.28, Stroke::new(1.4, col));
         }
         Icon::Sparkle => {
-            for i in 0..6 {
-                let t = i as f32 / 6.0 * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2;
+            // Claude's spark: a dozen tapered rays of uneven length and slightly uneven spacing,
+            // joined by a solid hub, so it reads as hand-drawn rather than a typed asterisk.
+            const RAYS: [(f32, f32); 12] = [
+                (0.96, 0.00), (0.74, 0.03), (0.90, -0.02), (0.70, 0.04), (0.98, 0.01), (0.78, -0.03),
+                (0.88, 0.02), (0.72, -0.02), (0.94, 0.03), (0.68, 0.00), (0.86, -0.04), (0.80, 0.02),
+            ];
+            for (i, &(len, jitter)) in RAYS.iter().enumerate() {
+                let t = (i as f32 + jitter * 4.0) / RAYS.len() as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
                 let d = Vec2::new(t.cos(), t.sin());
-                p.line_segment([c + d * h * 0.15, c + d * h * 0.9], Stroke::new(1.9, col));
+                let n = Vec2::new(-d.y, d.x);
+                let (base, tip) = (h * 0.12, h * 0.035);
+                let root = c + d * h * 0.1;
+                let end = c + d * h * len;
+                let ray = vec![root - n * base, end - n * tip, end + n * tip, root + n * base];
+                p.add(Shape::convex_polygon(ray, col, Stroke::NONE));
             }
+            p.circle_filled(c, h * 0.2, col);
         }
         Icon::Codex => {
             for i in 0..3 {
@@ -124,19 +162,19 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             p.circle_stroke(Pos2::new(r.right() + h * 0.18, r.center().y), h * 0.22, st);
         }
         Icon::Qwen => {
-            // Light band over the coloured sides, like the logo's white ribbon.
+            // Light band over the colored sides, like the logo's white ribbon.
             fill_pieces(p, c, h, QWEN_SIDES, col);
             fill_pieces(p, c, h, QWEN_BAND, col.lerp_to_gamma(Color32::WHITE, 0.8));
         }
         Icon::Antigravity => {
-            // Brand gradient regardless of `col`: a per-vertex-coloured mesh (no seams, but no
+            // Brand gradient regardless of `col`: a per-vertex-colored mesh (no seams, but no
             // anti-aliasing), then a thin gradient outline to soften the edge.
             let h = h * 0.9;
             let mut mesh = egui::epaint::Mesh::default();
             for piece in ANTIGRAVITY {
                 let base = mesh.vertices.len() as u32;
                 for &(x, y) in *piece {
-                    mesh.colored_vertex(c + Vec2::new(x, y) * h, antigravity_colour(x, y));
+                    mesh.colored_vertex(c + Vec2::new(x, y) * h, antigravity_color(x, y));
                 }
                 for i in 1..piece.len() as u32 - 1 {
                     mesh.add_triangle(base, base + i, base + i + 1);
@@ -146,7 +184,7 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             let outline = ANTIGRAVITY_OUTLINE.iter().map(|&(x, y)| c + Vec2::new(x, y) * h).collect();
             let stroke = egui::epaint::PathStroke::new_uv(0.6, move |_, pos| {
                 let v = (pos - c) / h;
-                antigravity_colour(v.x, v.y)
+                antigravity_color(v.x, v.y)
             });
             p.add(Shape::closed_line(outline, stroke));
         }
@@ -204,6 +242,20 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, color: Color32, tip: &str
     }
     paint_icon(p, icon, rect.center(), size * 0.55, if resp.hovered() { TEXT } else { color });
     resp.on_hover_text(tip)
+}
+
+/// Frameless text button: dim text, a soft background only on hover (for secondary toolbar actions).
+pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
+    let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font, TEXT_DIM);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x + 16.0, 26.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(rect, 5.0, if resp.is_pointer_button_down_on() { Color32::from_rgb(62, 66, 76) } else { CARD_HI });
+    }
+    let pos = Pos2::new(rect.center().x - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0);
+    p.galley_with_override_text_color(pos, galley, if resp.hovered() { TEXT } else { TEXT_DIM });
+    resp
 }
 
 /// Filled pill button with an icon and text (the primary action).
@@ -342,7 +394,7 @@ const OPENCODE: &[&[(f32, f32)]] = &[
 ];
 /// Antigravity outline, for an anti-aliased edge around the gradient mesh.
 const ANTIGRAVITY_OUTLINE: &[(f32, f32)] = &[(0.713, 0.815), (0.871, 0.923), (0.942, 0.930), (0.990, 0.905), (0.999, 0.863), (0.970, 0.803), (0.834, 0.640), (0.712, 0.404), (0.458, -0.414), (0.363, -0.645), (0.239, -0.815), (0.133, -0.884), (0.071, -0.902), (-0.065, -0.902), (-0.183, -0.855), (-0.278, -0.767), (-0.391, -0.573), (-0.706, 0.404), (-0.828, 0.640), (-0.979, 0.824), (-0.999, 0.869), (-0.995, 0.902), (-0.964, 0.928), (-0.897, 0.931), (-0.836, 0.910), (-0.755, 0.854), (-0.664, 0.773), (-0.554, 0.642), (-0.342, 0.298), (-0.263, 0.196), (-0.130, 0.105), (0.003, 0.083), (0.136, 0.105), (0.269, 0.196), (0.594, 0.687)];
-/// Antigravity's colour stops (yellow top, red right, green left, blue base), blended by distance.
+/// Antigravity's color stops (yellow top, red right, green left, blue base), blended by distance.
 const ANTIGRAVITY_STOPS: &[((f32, f32), [u8; 3])] = &[
     ((-0.45, -1.26), [0xFF, 0xE4, 0x32]),
     ((0.0, -1.33), [0xFB, 0xBC, 0x04]),
@@ -356,7 +408,7 @@ const ANTIGRAVITY_STOPS: &[((f32, f32), [u8; 3])] = &[
 ];
 
 /// The Antigravity gradient at a point in the logo's -1..1 coordinates (Gaussian-weighted stops).
-fn antigravity_colour(x: f32, y: f32) -> Color32 {
+fn antigravity_color(x: f32, y: f32) -> Color32 {
     let (mut sum, mut rgb) = (0.0, [0.0f32; 3]);
     for &((sx, sy), c) in ANTIGRAVITY_STOPS {
         let w = (-((x - sx).powi(2) + (y - sy).powi(2)) / 0.36).exp();
@@ -448,7 +500,7 @@ fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
     p.add(Shape::line(vec![Pos2::new(c.x - w, c.y - h + 0.5), Pos2::new(c.x, c.y + h + 0.5), Pos2::new(c.x + w, c.y - h + 0.5)], Stroke::new(1.6, col)));
 }
 
-/// The accent colours offered for a project, tuned to read well on the dark bars.
+/// The accent colors offered for a project, tuned to read well on the dark bars.
 pub const ACCENTS: [(&str, [u8; 3]); 11] = [
     ("Coral", [240, 113, 103]),
     ("Amber", [240, 166, 62]),
@@ -500,11 +552,11 @@ pub fn paint_swatch(p: &egui::Painter, c: Pos2, r: f32, color: Option<Color32>, 
     }
 }
 
-/// The accent picker (for a menu or popup): "None", the preset swatches and a custom colour.
+/// The accent picker (for a menu or popup): "None", the preset swatches and a custom color.
 /// Returns the new choice when the user picks one.
 pub fn accent_picker(ui: &mut Ui, current: Option<[u8; 3]>) -> Option<Option<[u8; 3]>> {
     let mut picked: Option<Option<[u8; 3]>> = None;
-    ui.label(egui::RichText::new("Accent colour").size(12.0).color(TEXT_DIM));
+    ui.label(egui::RichText::new("Accent color").size(12.0).color(TEXT_DIM));
     ui.add_space(4.0);
     let cell = 26.0;
     let per_row = 6;

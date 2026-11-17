@@ -25,7 +25,7 @@ impl App {
         let d = self.dormant.iter().find(|d| d.id == id)?;
         Some(json!({
             "sessionId": d.saved.agent_id, "terminalKey": format!("listed-{}", d.id), "name": d.display_name(),
-            "kind": d.saved.profile.name, "state": "NotRunning", "isRunning": false, "isSelected": false, "archived": d.saved.archived,
+            "kind": d.saved.profile.name, "state": "NotRunning", "isRunning": false, "isSelected": false, "archived": d.saved.archived, "savedForLater": d.saved.later,
             "projectPath": d.saved.project.display().to_string()
         }))
     }

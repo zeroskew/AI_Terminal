@@ -1,4 +1,4 @@
-//! Colours, egui style and fonts (the ASM Test Bench dark theme).
+//! Colors, egui style and fonts (the ASM Test Bench dark theme).
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke};
 use std::path::PathBuf;
@@ -117,6 +117,18 @@ fn face_data(face: &crate::fonts::Face) -> Option<FontData> {
     Some(d)
 }
 
+/// The bold instance of a variable font (one with a `wght` axis, like Cascadia Code, which
+/// ships as a single file with no separate Bold face), sharing the regular face's bytes.
+fn variable_bold(regular: &FontData) -> Option<FontData> {
+    let axis = regular.variation_axes().into_iter().find(|a| &a.tag.to_be_bytes() == b"wght")?;
+    let weight = 700.0f32.clamp(axis.range.min, axis.range.max);
+    if weight <= axis.default {
+        return None;
+    }
+    let tweak = egui::epaint::text::FontTweak { coords: egui::epaint::text::VariationCoords::new([(b"wght", weight)]), ..regular.tweak.clone() };
+    Some(regular.clone().tweak(tweak))
+}
+
 /// Installs the UI fonts and the terminal font chain for `family_list` (a CSS-style list like
 /// `'MesloLGS NF', …, 'Consolas', monospace`): every installed entry is added
 /// in order, so later ones supply glyphs the first lacks; `monospace` is egui's built-in Hack.
@@ -150,10 +162,10 @@ pub fn install_fonts(ctx: &egui::Context, family_list: &str) {
         let Some((regular, bold_face)) = crate::fonts::find(name) else { continue };
         let Some(data) = face_data(&regular) else { continue };
         let key = format!("code_{i}");
-        defs.font_data.insert(key.clone(), Arc::new(data));
         if code_family.is_empty() {
-            first_bold = bold_face.as_ref().and_then(face_data);
+            first_bold = bold_face.as_ref().and_then(face_data).or_else(|| variable_bold(&data));
         }
+        defs.font_data.insert(key.clone(), Arc::new(data));
         code_family.push(key);
     }
     if code_family.is_empty() {
@@ -190,4 +202,16 @@ pub fn install_fonts(ctx: &egui::Context, family_list: &str) {
         }
     }
     ctx.set_fonts(defs);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn variable_font_gets_a_bold_instance() {
+        // Cascadia Code installs as one variable file: bold comes from its wght axis.
+        let Some((regular, None)) = crate::fonts::find("Cascadia Code") else { return };
+        let data = super::face_data(&regular).unwrap();
+        let bold = super::variable_bold(&data).expect("wght axis");
+        assert_eq!(bold.tweak.coords.as_ref()[0].1, 700.0);
+    }
 }

@@ -1,4 +1,4 @@
-//! Terminal colour scheme (Options > Terminal): core colours, the 16 ANSI colours, an optional
+//! Terminal color scheme (Options > Terminal): core colors, the 16 ANSI colors, an optional
 //! background image, and built-in presets.
 
 use egui::Color32;
@@ -27,6 +27,33 @@ pub struct TermTheme {
     /// While the image is shown, use `bg_color` instead of `background` behind it.
     pub bg_color_override: bool,
     pub bg_color: Rgb,
+}
+
+/// A project's own terminal background (Project settings), used instead of the one in
+/// Options > Terminal while `enabled`. No image means a plain background for that project.
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct ProjectBg {
+    pub enabled: bool,
+    pub image: Option<PathBuf>,
+    pub opacity: f32,
+    pub fit: BgFit,
+    pub blur: f32,
+    pub color_override: bool,
+    pub color: Rgb,
+}
+
+impl Default for ProjectBg {
+    fn default() -> Self {
+        ProjectBg { enabled: false, image: None, opacity: 0.5, fit: BgFit::Fill, blur: 0.0, color_override: false, color: [0x1e, 0x1e, 0x1e] }
+    }
+}
+
+impl ProjectBg {
+    /// Starts from the global settings, so ticking the override begins with what's shown now.
+    pub fn from_theme(t: &TermTheme) -> Self {
+        ProjectBg { enabled: false, image: t.bg_image.clone(), opacity: t.bg_opacity, fit: t.bg_fit, blur: t.bg_blur, color_override: t.bg_color_override, color: t.bg_color }
+    }
 }
 
 /// How the background image is laid out in the terminal pane.
@@ -157,7 +184,7 @@ pub fn parse_hex(s: &str) -> Option<Rgb> {
     Some(hex(v))
 }
 
-/// The theme as egui colours, built once per frame for the renderer.
+/// The theme as egui colors, built once per frame for the renderer.
 pub struct Palette {
     pub bg: Color32,
     pub fg: Color32,
@@ -176,7 +203,7 @@ impl TermTheme {
         self.bg_image.as_ref().filter(|_| self.bg_image_enabled)
     }
 
-    /// The terminal background: the image's override colour while an image is active, else `background`.
+    /// The terminal background: the image's override color while an image is active, else `background`.
     pub fn effective_background(&self) -> Rgb {
         if self.bg_color_override && self.active_bg_image().is_some() { self.bg_color } else { self.background }
     }
@@ -190,6 +217,22 @@ impl TermTheme {
         self.bg_image_enabled = other.bg_image_enabled;
         self.bg_color_override = other.bg_color_override;
         self.bg_color = other.bg_color;
+    }
+
+    /// This theme with a project's background settings in place of its own (when the project
+    /// overrides them).
+    pub fn with_project_bg(&self, bg: Option<&ProjectBg>) -> TermTheme {
+        let mut t = self.clone();
+        if let Some(b) = bg.filter(|b| b.enabled) {
+            t.bg_image_enabled = true;
+            t.bg_image = b.image.clone();
+            t.bg_opacity = b.opacity;
+            t.bg_fit = b.fit;
+            t.bg_blur = b.blur;
+            t.bg_color_override = b.color_override;
+            t.bg_color = b.color;
+        }
+        t
     }
 
     pub fn same_colors(&self, other: &TermTheme) -> bool {
