@@ -171,9 +171,11 @@ impl App {
             if !auto_dismiss {
                 r.dismiss_from = None;
             }
-            // Share of the countdown left (1 = just started).
-            let left = r.dismiss_from.map(|t| 1.0 - t.elapsed().as_secs_f32() / DISMISS_AFTER.as_secs_f32());
-            if left.is_some_and(|l| l <= 0.0) {
+            // Share of the countdown left (1 = just started), then a quick fade-out once it runs out.
+            let elapsed = r.dismiss_from.map(|t| t.elapsed().as_secs_f32());
+            let left = elapsed.map(|e| (1.0 - e / DISMISS_AFTER.as_secs_f32()).max(0.0));
+            let opacity = elapsed.map_or(1.0, |e| 1.0 - (e - DISMISS_AFTER.as_secs_f32()).max(0.0) / FADE_OUT.as_secs_f32());
+            if opacity <= 0.0 {
                 close.push(r.id);
                 continue;
             }
@@ -190,6 +192,7 @@ impl App {
             };
             let area = egui::Area::new(egui::Id::unique(("script_run", r.id))).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-12.0, -y)).order(egui::Order::Foreground);
             let resp = area.show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
                 let frame = egui::Frame::new().fill(PANEL).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
                     ui.set_width(w);
                     ui.horizontal(|ui| {
@@ -432,6 +435,8 @@ pub(super) struct ScriptRun {
 
 /// How long a finished panel stays before it closes itself.
 const DISMISS_AFTER: Duration = Duration::from_secs(10);
+/// How long the auto-dismissed panel takes to fade out.
+const FADE_OUT: Duration = Duration::from_millis(150);
 
 /// Output kept per run (older output is dropped).
 const MAX_OUT: usize = 512 * 1024;
