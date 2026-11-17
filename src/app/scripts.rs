@@ -234,15 +234,26 @@ impl App {
                     });
                     // The header glow: the status color fading out downwards from the top edge.
                     let hr = header.response.rect;
-                    let band = egui::Rect::from_min_max(egui::pos2(hr.left() - 9.0, hr.top() - 9.0), egui::pos2(hr.right() + 9.0, hr.bottom() + 6.0));
-                    // Corners cut so it stays inside the panel's rounded corners.
+                    // It reaches the border's inner edge (inner margin 10), with top corners rounded
+                    // like the border's inner edge (radius 8 minus the 1.5 stroke), so no dark gap shows.
+                    // Pushed 0.5 under the stroke so its anti-aliased edge leaves no seam.
+                    let (edge, radius) = (10.5, 7.0);
+                    let band = egui::Rect::from_min_max(egui::pos2(hr.left() - edge, hr.top() - edge), egui::pos2(hr.right() + edge, hr.bottom() + 6.0));
                     let mut mesh = egui::Mesh::default();
                     let shade = |y: f32| col.gamma_multiply(0.16 * (band.bottom() - y) / band.height());
-                    let cut = 5.0;
-                    for (x, y) in [(band.left() + cut, band.top()), (band.right() - cut, band.top()), (band.right(), band.top() + cut), (band.right(), band.bottom()), (band.left(), band.bottom()), (band.left(), band.top() + cut)] {
-                        mesh.colored_vertex(egui::pos2(x, y), shade(y));
+                    let mut points = vec![egui::pos2(band.left(), band.bottom()), egui::pos2(band.right(), band.bottom())];
+                    let steps = 8;
+                    for (cx, from) in [(band.right() - radius, 0.0f32), (band.left() + radius, 90.0)] {
+                        for i in 0..=steps {
+                            let a = (from + 90.0 * i as f32 / steps as f32).to_radians();
+                            points.push(egui::pos2(cx + radius * a.cos(), band.top() + radius - radius * a.sin()));
+                        }
                     }
-                    for i in 1..5 {
+                    for p in &points {
+                        mesh.colored_vertex(*p, shade(p.y));
+                    }
+                    // Convex, so a fan from the first point covers it.
+                    for i in 1..points.len() as u32 - 1 {
                         mesh.add_triangle(0, i, i + 1);
                     }
                     ui.painter().set(glow, mesh);
