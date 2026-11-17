@@ -1508,7 +1508,15 @@ impl eframe::App for App {
             .collect();
         // Listed sessions that weren't started this time stay in the list.
         self.s.sessions.extend(self.dormant.iter().map(|d| d.saved.clone()));
+        // A Project settings preview isn't saved: write the project as it was before the dialog.
+        let preview = self.project_settings_original().cloned().and_then(|orig| {
+            let p = self.s.projects.iter_mut().find(|x| x.path == orig.path)?;
+            Some(std::mem::replace(p, orig))
+        });
         eframe::set_value(storage, eframe::APP_KEY, &self.s);
+        if let Some(prev) = preview {
+            self.restore_project(&prev);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {

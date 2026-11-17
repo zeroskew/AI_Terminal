@@ -3,7 +3,8 @@
 
 use super::*;
 
-/// The dialog's working copy; applied on Save.
+/// The dialog's working copy. It's previewed live on the project while the dialog is open
+/// (Cancel puts `original` back); Save applies it for good, copying images in.
 pub(super) struct ProjectDraft {
     pub path: PathBuf,
     pub name: String,
@@ -15,6 +16,8 @@ pub(super) struct ProjectDraft {
     pub bg: term_theme::ProjectBg,
     /// Focus the name field on the first frame only.
     focused: bool,
+    /// The project as it was when the dialog opened.
+    original: Project,
 }
 
 /// Where project images are copied, so they survive the original being moved or cleaned up
@@ -51,7 +54,7 @@ impl App {
     pub(super) fn open_project_settings(&mut self, path: &Path) {
         if let Some(p) = self.s.projects.iter().find(|x| x.path == path) {
             let bg = p.background.clone().unwrap_or_else(|| term_theme::ProjectBg::from_theme(&self.s.term_theme));
-            self.project_settings = Some(ProjectDraft { path: p.path.clone(), name: p.name.clone(), accent: p.accent, image: p.image.clone(), in_tabs: p.in_tabs, bg, focused: false });
+            self.project_settings = Some(ProjectDraft { path: p.path.clone(), name: p.name.clone(), accent: p.accent, image: p.image.clone(), in_tabs: p.in_tabs, bg, focused: false, original: p.clone() });
         }
     }
 
@@ -242,13 +245,50 @@ impl App {
             done = Some(false);
         }
         match done {
-            None => self.project_settings = Some(d),
-            Some(false) => self.focus_terminal = true,
+            None => {
+                self.preview_project_settings(&d, ctx);
+                self.project_settings = Some(d);
+            }
+            Some(false) => {
+                self.restore_project(&d.original);
+                self.focus_terminal = true;
+            }
             Some(true) => {
+                self.restore_project(&d.original);
                 self.apply_project_settings(d, ctx);
                 self.focus_terminal = true;
             }
         }
+    }
+
+    /// Shows the draft on the project right away (picked images are used in place; they're only
+    /// copied in on Save). The tab setting waits for Save.
+    fn preview_project_settings(&mut self, d: &ProjectDraft, ctx: &egui::Context) {
+        let Some(p) = self.s.projects.iter_mut().find(|x| x.path == d.path) else { return };
+        let name = d.name.trim();
+        let name = if name.is_empty() { project_name(&d.path) } else { name.to_string() };
+        let background = (d.bg.enabled || d.original.background.is_some()).then(|| d.bg.clone());
+        if p.name == name && p.accent == d.accent && p.image == d.image && p.background == background {
+            return;
+        }
+        p.name = name;
+        p.accent = d.accent;
+        p.image = d.image.clone();
+        p.background = background;
+        // The terminal background was already drawn this frame from the old values.
+        ctx.request_repaint();
+    }
+
+    /// Undoes a live preview.
+    pub(super) fn restore_project(&mut self, original: &Project) {
+        if let Some(p) = self.s.projects.iter_mut().find(|x| x.path == original.path) {
+            *p = original.clone();
+        }
+    }
+
+    /// The project settings as last saved, for writing to disk while a preview is showing.
+    pub(super) fn project_settings_original(&self) -> Option<&Project> {
+        self.project_settings.as_ref().map(|d| &d.original)
     }
 
     /// Copies a newly picked image in (a stored one is kept as is) and deletes the stored copy it
