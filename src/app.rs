@@ -331,6 +331,8 @@ pub struct Settings {
     /// Search window: every session (else the current one), and how many days back (0 = all).
     pub search_all: bool,
     pub search_days: u32,
+    /// Searches made from the header's "Search this session" box, newest first.
+    pub find_history: Vec<String>,
     /// Check GitHub for a new release now and then, download it, and install it at the next restart.
     pub auto_update: bool,
     /// When automatic checks run: shortly after start-up, and/or twice a day (every 12 hours from
@@ -407,6 +409,7 @@ impl Default for Settings {
             script_panel_size: None,
             search_all: true,
             search_days: 0,
+            find_history: Vec::new(),
             auto_update: true,
             update_on_startup: true,
             update_periodic: false,
@@ -659,6 +662,8 @@ pub struct App {
     search_ui: Option<search_ui::SearchUi>,
     /// The header's "Search this session" box.
     header_query: String,
+    /// The header search box's recent-searches dropdown is showing.
+    find_hist_open: bool,
     /// The Check for updates dialog is open.
     update_dialog: bool,
     /// The update whose "downloaded" toast was shown (once per tag).
@@ -810,6 +815,7 @@ impl App {
             open_new_menu: std::env::args().any(|a| a == "--new-menu"),
             search_ui: None,
             header_query: String::new(),
+            find_hist_open: false,
             update_dialog: std::env::args().any(|a| a == "--check-updates"),
             update_announced: None,
             opts_snapshot: None,

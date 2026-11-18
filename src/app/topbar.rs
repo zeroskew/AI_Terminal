@@ -499,26 +499,110 @@ impl App {
                     self.snippets_open = true;
                     self.snippet_focus = true;
                 }
+                // The search box. Clicking into it drops down the recent searches: click one to
+                // search it again, × to forget it.
+                let mut find: Option<String> = None;
+                let mut forget: Option<usize> = None;
+                let mut forget_all = false;
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut self.header_query)
                         .hint_text("Search this session…")
                         .desired_width(180.0)
-                        .margin(egui::Margin::symmetric(8, 4)),
+                        .margin(egui::Margin { left: 8, right: 26, top: 4, bottom: 4 }),
                 );
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    let q = self.header_query.trim().to_string();
-                    if !q.is_empty() {
-                        if let Some(t) = self.active_tab_mut() {
-                            t.view.search.open = true;
-                            t.view.search.focus = false;
-                            t.view.search.query = q;
-                        }
+                    find = Some(std::mem::take(&mut self.header_query));
+                }
+                // A magnifying glass inside the box's right end, once there's text: click to search.
+                if !self.header_query.trim().is_empty() {
+                    let gr = egui::Rect::from_center_size(egui::pos2(edit.rect.right() - 13.0, edit.rect.center().y), Vec2::splat(20.0));
+                    let go = ui.interact(gr, ui.auto_id_with("header_find_go"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if go.hovered() {
+                        ui.painter().rect_filled(gr, 4.0, CARD_HI);
                     }
+                    widgets::paint_icon(ui.painter(), Icon::Search, gr.center(), 13.0, if go.hovered() { TEXT } else { TEXT_DIM });
+                    if go.on_hover_text("Search (Enter)").clicked() {
+                        find = Some(std::mem::take(&mut self.header_query));
+                    }
+                }
+                if (edit.gained_focus() || edit.clicked()) && !self.s.find_history.is_empty() {
+                    self.find_hist_open = true;
+                }
+                let mut hist_open = self.find_hist_open;
+                let popup = egui::Popup::from_response(&edit).open_bool(&mut hist_open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).align(egui::RectAlign::BOTTOM_START).show(|ui| {
+                    ui.set_min_width(edit.rect.width().max(240.0));
+                    if self.s.find_history.is_empty() {
+                        ui.label(RichText::new("No recent searches").color(TEXT_FAINT));
+                        return;
+                    }
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        for (i, q) in self.s.find_history.iter().enumerate() {
+                            let (rr, rresp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+                            let xr = egui::Rect::from_center_size(egui::pos2(rr.right() - 12.0, rr.center().y), Vec2::splat(18.0));
+                            let xresp = ui.interact(xr, ui.auto_id_with(("find_hist_x", i)), Sense::click());
+                            let p = ui.painter();
+                            if rresp.hovered() || xresp.hovered() {
+                                p.rect_filled(rr, 4.0, CARD_HI);
+                            }
+                            let mut job = egui::text::LayoutJob::simple_singleline(q.clone(), egui::FontId::new(13.5, egui::FontFamily::Proportional), TEXT);
+                            job.wrap.max_width = (xr.left() - 4.0 - (rr.left() + 8.0)).max(20.0);
+                            job.wrap.max_rows = 1;
+                            job.wrap.break_anywhere = true;
+                            job.wrap.overflow_character = Some('…');
+                            let g = ui.fonts_mut(|f| f.layout_job(job));
+                            p.galley_with_override_text_color(egui::pos2(rr.left() + 8.0, rr.center().y - g.size().y / 2.0), g, if rresp.hovered() { TEXT } else { TEXT_DIM });
+                            if rresp.hovered() || xresp.hovered() {
+                                if xresp.hovered() {
+                                    p.rect_filled(xr, 3.0, CARD);
+                                }
+                                widgets::paint_icon(p, Icon::Close, xr.center(), 11.0, if xresp.hovered() { TEXT } else { TEXT_DIM });
+                            }
+                            if xresp.on_hover_text("Remove from history").clicked() {
+                                forget = Some(i);
+                            } else if rresp.clicked() {
+                                find = Some(q.clone());
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if ui.button(RichText::new("Clear history").color(TEXT_DIM)).clicked() {
+                        forget_all = true;
+                        ui.close();
+                    }
+                });
+                // Clicks in the box or the list keep it open; anywhere else closes it.
+                if hist_open && ui.input(|i| i.pointer.any_click()) {
+                    let pos = ui.input(|i| i.pointer.interact_pos());
+                    let inside = pos.is_some_and(|p| edit.rect.contains(p) || popup.as_ref().is_some_and(|r| r.response.rect.contains(p)));
+                    if !inside {
+                        hist_open = false;
+                    }
+                }
+                if find.is_some() || forget_all {
+                    hist_open = false;
+                }
+                self.find_hist_open = hist_open;
+                if let Some(i) = forget {
+                    self.s.find_history.remove(i);
+                }
+                if forget_all {
+                    self.s.find_history.clear();
                 }
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                     self.header_query.clear();
                 }
                 edit.on_hover_text("Find text in this terminal (Enter)");
+                if let Some(q) = find.map(|q| q.trim().to_string()).filter(|q| !q.is_empty()) {
+                    self.s.find_history.retain(|h| *h != q);
+                    self.s.find_history.insert(0, q.clone());
+                    self.s.find_history.truncate(FIND_HISTORY_MAX);
+                    if let Some(t) = self.active_tab_mut() {
+                        t.view.search.open = true;
+                        t.view.search.focus = false;
+                        t.view.search.query = q;
+                    }
+                }
                 if let Some(url) = &github {
                     if widgets::icon_button(ui, Icon::GitHub, 26.0, TEXT_DIM, &format!("Open on GitHub: {url}")).clicked() {
                         crate::links::open_url(url);
@@ -577,6 +661,8 @@ impl App {
     }
 }
 
+/// Searches kept in the header search box's history.
+const FIND_HISTORY_MAX: usize = 30;
 /// Width of a project tab's close button area.
 const TAB_CLOSE_W: f32 = 18.0;
 /// The narrowest a tab's name gets before tabs start moving into the "»" menu.
