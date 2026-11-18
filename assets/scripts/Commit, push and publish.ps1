@@ -1,4 +1,4 @@
-# Commit and push (AI-written message), then release build and publish the exe as a GitHub Release
+# Commit and push (AI-written message), then release build and publish the exe as a GitHub Release - no prompts
 $OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $env:GIT_PAGER = 'cat'
 # The AI model for the commit message comes from Options > Scripts ($env:AI_TERMINAL_MODEL),
@@ -13,9 +13,10 @@ if (-not (Test-Path $commit)) { Write-Host "Commit and push.ps1 not found next t
 $cmd = Join-Path $root 'build_publish_exe.cmd'
 if (-not (Test-Path $cmd)) { Write-Host "build_publish_exe.cmd not found in $root." -ForegroundColor Red; exit 1 }
 
-# 1. Commit and push. It exits 0 for "nothing to commit" and for "cancelled" alike, so the
-#    working tree tells them apart: anything left uncommitted means stop here.
+# 1. Commit and push, without its "commit?" question. Should it still stop short (exit 0 for
+#    "nothing to commit" too), the working tree tells: anything left uncommitted means stop here.
 Write-Host "== Commit and push" -ForegroundColor Yellow
+$env:AI_TERMINAL_NO_PROMPT = "1"
 & $commit
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Set-Location $root
@@ -28,9 +29,9 @@ if (git log '@{u}..' --oneline 2>$null) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-# 2. Build and publish: fresh version stamp, release build, zip, Publish? [Y/n], gh release create.
+# 2. Build and publish (-y: no "Publish?" question): fresh version stamp, release build, zip, gh release create.
 Write-Host "`n== Build and publish" -ForegroundColor Yellow
-& $cmd @args
+& $cmd -y
 $code = $LASTEXITCODE
 if ($code -eq 0) { Write-Host "DONE" -ForegroundColor Green }
 exit $code

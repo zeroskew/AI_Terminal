@@ -21,15 +21,6 @@ const KINDS: [&str; 4] = ["ps1", "cmd", "bat", "py"];
 
 const SAMPLE_NAME: &str = "Commit and push.ps1";
 const SAMPLE: &str = include_str!("../../assets/scripts/Commit and push.ps1");
-/// Hashes (see `text_hash`) of earlier shipped versions of the sample. A copy that still matches
-/// one wasn't edited, so it's replaced with the current version.
-const OLD_SAMPLES: [u64; 4] = [0xa86de507e36a486b, 0xd48bff3611193aec, 0xde390a1ebd7c16bc, 0x0aad71dea74bf85a];
-
-/// FNV-1a of the text without BOM, with LF line ends and no trailing whitespace.
-fn text_hash(text: &str) -> u64 {
-    let t = text.trim_start_matches('\u{feff}').replace("\r\n", "\n");
-    t.trim_end().bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
-}
 
 /// `<exe folder>\scripts`.
 pub(super) fn scripts_dir() -> PathBuf {
@@ -41,10 +32,6 @@ fn scan() -> Vec<Script> {
     let dir = scripts_dir();
     if !dir.exists() && std::fs::create_dir_all(&dir).is_ok() {
         let _ = std::fs::write(dir.join(SAMPLE_NAME), SAMPLE);
-    }
-    let sample = dir.join(SAMPLE_NAME);
-    if std::fs::read_to_string(&sample).is_ok_and(|t| OLD_SAMPLES.contains(&text_hash(&t))) {
-        let _ = std::fs::write(&sample, SAMPLE);
     }
     let mut v: Vec<Script> = std::fs::read_dir(&dir)
         .into_iter()

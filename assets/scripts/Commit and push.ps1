@@ -44,8 +44,12 @@ if ($LASTEXITCODE -ne 0 -or -not $msg) {
 Write-Host ""
 $msg | ForEach-Object { Write-Host $_ -ForegroundColor Cyan }
 Write-Host ""
-Write-Host "Enter = commit and push, n = cancel"
-$answer = Read-Host
+# AI_TERMINAL_NO_PROMPT=1 (set by "Commit, push and publish.ps1"): commit without asking.
+$answer = ''
+if (-not $env:AI_TERMINAL_NO_PROMPT) {
+    Write-Host "Enter = commit and push, n = cancel"
+    $answer = Read-Host
+}
 if ($null -eq $answer -or $answer -eq 'n') {
     if ($new.Count) { git reset -q -- $new }
     Write-Host "Cancelled."
