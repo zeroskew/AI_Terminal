@@ -22,6 +22,7 @@ mod plugins_ui;
 mod scripts;
 mod agents_ui;
 mod snippets;
+mod favorites;
 mod options;
 mod mcp_api;
 mod launch;
@@ -314,8 +315,10 @@ pub struct Settings {
     /// For "custom": a command using {file}, {line}, {col}.
     pub editor_custom: String,
     pub snippets: Vec<Snippet>,
-    /// Height of the sidebar's Favourite Snippets panel (drag its top edge).
-    pub fav_snippets_h: f32,
+    /// Height of the sidebar's Favourites panel (drag its top edge).
+    pub favorites_h: f32,
+    /// Scripts in the sidebar's Favourites panel (lowercase file names, like `script_models`).
+    pub fav_scripts: Vec<String>,
     /// Show estimated session cost in the list and header.
     pub show_cost: bool,
     /// What the session usage shows: "plan" (share of the subscription's 5-hour / weekly
@@ -407,7 +410,8 @@ impl Default for Settings {
             editor: "auto".into(),
             editor_custom: String::new(),
             show_cost: true,
-            fav_snippets_h: 140.0,
+            favorites_h: 160.0,
+            fav_scripts: Vec::new(),
             usage_as: "plan".into(),
             keep_sessions: 20,
             active_on_top: true,
@@ -459,7 +463,7 @@ pub struct Snippet {
     pub text: String,
     /// Press Enter after inserting.
     pub send: bool,
-    /// Listed in the sidebar's Favourite Snippets area.
+    /// Listed in the sidebar's Favourites panel.
     pub favorite: bool,
 }
 
@@ -638,6 +642,8 @@ pub struct App {
     /// Options > Scripts editor state.
     script_drafts: Vec<scripts::ScriptDraft>,
     scripts_synced: bool,
+    /// The scripts folder was read for the Favourites panel.
+    scripts_scanned: bool,
     script_new_ext: String,
     /// Scripts running (or finished, until closed) in the background, each in a small panel.
     script_runs: Vec<scripts::ScriptRun>,
@@ -814,6 +820,7 @@ impl App {
             scripts: Vec::new(),
             script_drafts: Vec::new(),
             scripts_synced: false,
+            scripts_scanned: false,
             script_new_ext: "ps1".into(),
             script_runs: Vec::new(),
             agent_installs: None,

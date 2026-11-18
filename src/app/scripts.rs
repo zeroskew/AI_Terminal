@@ -109,7 +109,7 @@ impl App {
     }
 
     /// Starts a script in the background in the current project; its panel shows the output.
-    fn run_script(&mut self, ctx: &egui::Context, sc: &Script) {
+    pub(super) fn run_script(&mut self, ctx: &egui::Context, sc: &Script) {
         let project = self.current_project();
         if !project.is_dir() {
             return self.toast(format!("Folder not found: {}", project.display()), RED, ctx);
@@ -343,6 +343,27 @@ impl App {
         self.script_runs.retain(|r| !close.contains(&r.id));
     }
 
+    pub(super) fn toggle_fav_script(&mut self, key: String) {
+        if let Some(k) = self.s.fav_scripts.iter().position(|f| *f == key) {
+            self.s.fav_scripts.remove(k);
+        } else if !key.is_empty() {
+            self.s.fav_scripts.push(key);
+        }
+    }
+
+    /// The starred scripts that exist in the scripts folder (reads it once if the palette
+    /// hasn't yet).
+    pub(super) fn fav_script_list(&mut self) -> Vec<usize> {
+        if self.s.fav_scripts.is_empty() {
+            return Vec::new();
+        }
+        if !self.scripts_scanned && self.scripts.is_empty() {
+            self.scripts = scan();
+        }
+        self.scripts_scanned = true;
+        (0..self.scripts.len()).filter(|&i| script_key(&self.scripts[i].path).is_some_and(|k| self.s.fav_scripts.contains(&k))).collect()
+    }
+
     /// The scripts palette (Ctrl+Shift+R or the header button): filter, Enter = first match.
     pub(super) fn scripts_palette(&mut self, ctx: &egui::Context) {
         if !self.scripts_open {
@@ -351,6 +372,7 @@ impl App {
         let mut pick: Option<usize> = None;
         let mut close = false;
         let mut edit = false;
+        let mut star: Option<String> = None;
         let project = project_name(&self.current_project());
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let m = egui::Modal::new(egui::Id::unique("scripts")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(16)).show(ctx, |ui| {
@@ -391,11 +413,16 @@ impl App {
                     let sc = &self.scripts[i];
                     // The AI model it will use, else the file type.
                     let note = if sc.ai { model_note(&catalog, self.script_model(&sc.path).as_ref()) } else { sc.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase() };
-                    let mut row = super::snippets::palette_row(ui, &sc.name, &sc.desc, &note);
+                    let mut row = super::snippets::palette_row(ui, &sc.name, &sc.desc, &note, 28.0);
                     if sc.ai {
                         row = row.on_hover_text("Uses this AI model. Change it in Edit scripts…");
                     }
-                    if row.clicked() {
+                    let key = script_key(&sc.path).unwrap_or_default();
+                    let fav = self.s.fav_scripts.contains(&key);
+                    let sr = egui::Rect::from_center_size(egui::pos2(row.rect.right() - 20.0, row.rect.center().y), Vec2::splat(26.0));
+                    if super::snippets::star_button(ui, sr, egui::Id::unique(("script_star", i)), fav).clicked() {
+                        star = Some(key);
+                    } else if row.clicked() {
                         pick = Some(i);
                     }
                 }
@@ -403,6 +430,9 @@ impl App {
         });
         if m.should_close() {
             close = true;
+        }
+        if let Some(key) = star {
+            self.toggle_fav_script(key);
         }
         // A started script's answer box takes the keyboard, so the terminal doesn't.
         let mut started = false;
@@ -436,7 +466,7 @@ fn script_command(sc: &Script, pwsh: String) -> (String, Vec<String>) {
 }
 
 /// The settings key for a script's model: its lowercase file name.
-fn script_key(path: &Path) -> Option<String> {
+pub(super) fn script_key(path: &Path) -> Option<String> {
     Some(path.file_name()?.to_string_lossy().to_lowercase())
 }
 
