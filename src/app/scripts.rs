@@ -900,7 +900,18 @@ impl App {
                             d.text = d.saved_text.clone();
                             d.error = None;
                         }
-                        if ui.add_enabled(d.dirty(), egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                        // Unsaved edits (or a new script) outline Save instead of a separate badge.
+                        let mut save_btn = egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(ACCENT);
+                        if d.dirty() {
+                            save_btn = save_btn.stroke(egui::Stroke::new(2.0, Color32::from_rgb(230, 140, 40)));
+                        }
+                        let save_resp = ui.add_enabled(d.dirty(), save_btn);
+                        let save_resp = if d.dirty() {
+                            save_resp.on_hover_text(if d.path.is_none() { "New script: not saved yet" } else { "Unsaved changes" })
+                        } else {
+                            save_resp
+                        };
+                        if save_resp.clicked() {
                             let old = d.path.as_deref().and_then(script_key);
                             d.error = d.save().err();
                             saved = true;
@@ -914,10 +925,6 @@ impl App {
                                 }
                             }
                             d.confirm_delete = false;
-                        }
-                        // In the right-to-left run (left of Save) so the buttons can't paint over it.
-                        if d.dirty() {
-                            widgets::pill(ui, if d.path.is_none() { "new" } else { "unsaved" }, Color32::WHITE, Color32::from_rgb(150, 80, 20));
                         }
                     });
                 });
