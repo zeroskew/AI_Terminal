@@ -505,15 +505,25 @@ fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
         return;
     }
     let p = ui.painter().with_clip_rect(rect);
-    let fade = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 10.0), rect.right_bottom());
+    // A vertical gradient whose two ends curve down into the bottom corners (an elliptical
+    // quarter arc `rx` wide and `ry` tall) instead of stopping at a hard vertical edge.
+    const SEGMENTS: usize = 10;
+    let (ry, rx) = (10.0, (rect.width() / 2.0).min(18.0));
+    let alpha = 110.0 * k;
+    let mut xs: Vec<f32> = (0..=SEGMENTS).map(|i| rect.left() + rx * i as f32 / SEGMENTS as f32).collect();
+    xs.extend((0..=SEGMENTS).map(|i| rect.right() - rx * (SEGMENTS - i) as f32 / SEGMENTS as f32));
     let mut mesh = egui::Mesh::default();
-    let (top, bottom) = (Color32::TRANSPARENT, Color32::from_rgba_unmultiplied(0, 0, 0, (110.0 * k) as u8));
-    mesh.colored_vertex(fade.left_top(), top);
-    mesh.colored_vertex(fade.right_top(), top);
-    mesh.colored_vertex(fade.left_bottom(), bottom);
-    mesh.colored_vertex(fade.right_bottom(), bottom);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(1, 3, 2);
+    for (i, &x) in xs.iter().enumerate() {
+        let t = ((x - rect.left()).min(rect.right() - x) / rx).clamp(0.0, 1.0);
+        let arc = (1.0 - (1.0 - t) * (1.0 - t)).sqrt();
+        mesh.colored_vertex(Pos2::new(x, rect.bottom() - ry * arc), Color32::TRANSPARENT);
+        mesh.colored_vertex(Pos2::new(x, rect.bottom()), Color32::from_rgba_unmultiplied(0, 0, 0, (alpha * arc) as u8));
+        if i > 0 {
+            let b = 2 * i as u32;
+            mesh.add_triangle(b - 2, b, b - 1);
+            mesh.add_triangle(b, b + 1, b - 1);
+        }
+    }
     p.add(Shape::mesh(mesh));
 }
 

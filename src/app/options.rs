@@ -662,6 +662,7 @@ impl App {
             });
         });
         ui.checkbox(&mut self.s.reopen_sessions, "Keep sessions in the list after restart (resume on click)");
+        ui.add_enabled(self.s.reopen_sessions, egui::Checkbox::new(&mut self.s.open_last_session, "Open the last session at start-up"));
         ui.add_enabled(self.s.reopen_sessions, egui::Checkbox::new(&mut self.s.import_claude_sessions, "List Claude sessions started in other apps (checked at start-up)"));
         ui.label(RichText::new("Conversations from the Claude CLI, Claude's desktop app or other terminals (~\\.claude\\projects) are added to their folder's project; new folders are added as projects on Home.").size(12.0).color(TEXT_FAINT));
         ui.horizontal(|ui| {

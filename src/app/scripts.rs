@@ -98,6 +98,11 @@ impl App {
         if !project.is_dir() {
             return self.toast(format!("Folder not found: {}", project.display()), RED, ctx);
         }
+        if !sc.path.is_file() {
+            // Renamed or deleted outside the app: reload the list so it stops showing.
+            self.scripts = scan();
+            return self.toast(format!("Script not found: {}", sc.path.display()), RED, ctx);
+        }
         let (program, args) = script_command(sc, self.pwsh());
         let env = self.script_model(&sc.path).map(|m| vec![("AI_TERMINAL_CLI".to_string(), m.cli), ("AI_TERMINAL_MODEL".to_string(), m.model), ("AI_TERMINAL_EFFORT".to_string(), m.effort)]).unwrap_or_default();
         match ScriptRun::start(ctx, sc.name.clone(), program, args, project, None, env) {
@@ -863,6 +868,9 @@ impl App {
         ui.add_space(8.0);
         let mut remove = None;
         let mut open: Option<PathBuf> = None;
+        // A save changed what's on disk; (old key, new key) of a rename.
+        let mut saved = false;
+        let mut renamed: Vec<(String, String)> = Vec::new();
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let models = &mut self.s.script_models;
         for (i, d) in self.script_drafts.iter_mut().enumerate() {
@@ -895,12 +903,14 @@ impl App {
                         if ui.add_enabled(d.dirty(), egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(ACCENT)).clicked() {
                             let old = d.path.as_deref().and_then(script_key);
                             d.error = d.save().err();
-                            // A rename keeps the script's model.
+                            saved = true;
+                            // A rename keeps the script's model and favourite stars.
                             if let (Some(old), Some(new)) = (old, d.path.as_deref().and_then(script_key)) {
                                 if old != new {
                                     if let Some(m) = models.remove(&old) {
-                                        models.insert(new, m);
+                                        models.insert(new.clone(), m);
                                     }
+                                    renamed.push((old, new));
                                 }
                             }
                             d.confirm_delete = false;
@@ -939,16 +949,25 @@ impl App {
             });
             ui.add_space(6.0);
         }
+        for (old, new) in &renamed {
+            self.rename_fav(super::favorites::FavList::Scripts, old, new);
+        }
         if let Some(i) = remove {
             let d = self.script_drafts.remove(i);
             if let Some(key) = d.path.as_deref().and_then(script_key) {
                 self.s.script_models.remove(&key);
+                self.forget_fav(super::favorites::FavList::Scripts, &key);
             }
             if let Some(p) = d.path {
                 if let Err(e) = std::fs::remove_file(&p) {
                     self.toast(format!("Couldn't delete {}: {e}", p.display()), RED, ui.ctx());
                 }
             }
+            saved = true;
+        }
+        // The palette and Favourites panel run from this list: keep it in step with the folder.
+        if saved {
+            self.scripts = scan();
         }
         if let Some(p) = open {
             if let Err(e) = crate::links::open_file(&p, None, None, &self.s.editor, &self.s.editor_custom) {

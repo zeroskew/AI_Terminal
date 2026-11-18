@@ -259,6 +259,10 @@ pub struct Settings {
     /// At start-up, list Claude conversations started elsewhere (the CLI, Claude's desktop app,
     /// other terminals) so they can be resumed here; their folders are added as projects.
     pub import_claude_sessions: bool,
+    /// At start-up, resume the session that was selected when the app last closed.
+    pub open_last_session: bool,
+    /// That session's conversation id (Claude / Codex), kept for `open_last_session`.
+    pub last_session: Option<String>,
     pub selected_project: Option<PathBuf>,
     /// The last project tab selected (kept while Home is showing); start-up reopens it.
     pub last_project: Option<PathBuf>,
@@ -374,6 +378,8 @@ impl Default for Settings {
             sessions: Vec::new(),
             reopen_sessions: true,
             import_claude_sessions: true,
+            open_last_session: true,
+            last_session: None,
             selected_project: None,
             last_project: None,
             default_profile: crate::session::CLAUDE.into(),
@@ -648,6 +654,8 @@ pub struct App {
     scripts_scanned: bool,
     /// Options > Snippets: (row, name) when its name box got focus, to move stars on rename.
     snippet_name_before: Option<(usize, String)>,
+    /// When a Favourites row last ran, so a double-click doesn't run it twice.
+    fav_last_pick: Option<std::time::Instant>,
     script_new_ext: String,
     /// Scripts running (or finished, until closed) in the background, each in a small panel.
     script_runs: Vec<scripts::ScriptRun>,
@@ -826,6 +834,7 @@ impl App {
             scripts_synced: false,
             scripts_scanned: false,
             snippet_name_before: None,
+            fav_last_pick: None,
             script_new_ext: "ps1".into(),
             script_runs: Vec::new(),
             agent_installs: None,
@@ -871,7 +880,8 @@ impl App {
         }
         app.refresh_catalog(&ctx);
         let selected = app.s.selected_project.clone().or_else(|| app.s.last_project.clone());
-        // Nothing starts by itself: sessions from last time are listed and resume when clicked.
+        // Sessions from last time are listed and resume when clicked (only the last selected one
+        // may start by itself, with "Open the last session at start-up").
         let saved = if app.s.reopen_sessions { std::mem::take(&mut app.s.sessions) } else { Vec::new() };
         for mut ss in saved {
             if app.s.projects.iter().any(|p| p.path == ss.project) {
@@ -921,6 +931,12 @@ impl App {
         // re-shows its tab, so falling back to a hidden one would undo the user's closing it.
         let selected = selected.filter(|p| app.s.projects.iter().any(|x| &x.path == p && x.in_tabs)).or_else(|| app.tab_projects().into_iter().next());
         app.select_project(selected);
+        if app.s.open_last_session {
+            let last = app.s.last_session.clone();
+            if let Some(id) = last.and_then(|a| app.dormant.iter().find(|d| d.saved.agent_id.as_deref() == Some(a.as_str())).map(|d| d.id)) {
+                app.resume(&ctx, id);
+            }
+        }
         // Test hooks: `--add-project <dir>` adds (and selects) a project tab; `--start <profile>` starts a session; `--paste-image <file>` registers a file as pasted into the active session
         // (as if pasted with Ctrl+V); `--type <text>` types a line into it.
         let args: Vec<String> = std::env::args().collect();
@@ -1559,6 +1575,15 @@ impl App {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // The selected session (running or not), for "Open the last session at start-up".
+        // Home showing (nothing selected) keeps the previous one.
+        if let Some(a) = self.active {
+            let id = self.tabs.iter().find(|t| t.sess.id == a).map(|t| t.sess.agent_id.clone())
+                .or_else(|| self.dormant.iter().find(|d| d.id == a).map(|d| d.saved.agent_id.clone()));
+            if let Some(id) = id {
+                self.s.last_session = id;
+            }
+        }
         self.s.sessions = self.sidebar_order().iter().filter_map(|id| self.tabs.iter().find(|t| t.sess.id == *id)).filter(|t| t.sess.profile.kind.tracks_conversation())
             // Sessions never used have nothing to resume: they aren't listed next time.
             .filter(|t| agents::conversation_exists(t.sess.profile.kind, &t.sess.cwd, t.sess.agent_id.as_deref()))

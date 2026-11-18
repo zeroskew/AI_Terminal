@@ -97,24 +97,40 @@ impl App {
         }
     }
 
-    /// A snippet was renamed: its stars and pin (in every project) follow it.
-    pub(super) fn rename_fav_snippet(&mut self, old: &str, new: &str) {
-        let lists = self.s.projects.iter_mut().map(|p| &mut p.fav_snippets).chain(std::iter::once(&mut self.s.pinned_snippets));
-        for v in lists {
+    /// Every project's list of that kind, plus the pinned one.
+    fn all_fav_lists(&mut self, list: FavList) -> impl Iterator<Item = &mut Vec<String>> {
+        let (projects, pinned) = (&mut self.s.projects, match list {
+            FavList::Snippets => &mut self.s.pinned_snippets,
+            FavList::Scripts => &mut self.s.pinned_scripts,
+        });
+        projects
+            .iter_mut()
+            .map(move |p| match list {
+                FavList::Snippets => &mut p.fav_snippets,
+                FavList::Scripts => &mut p.fav_scripts,
+            })
+            .chain(std::iter::once(pinned))
+    }
+
+    /// A snippet or script was renamed: its stars and pin (in every project) follow it.
+    pub(super) fn rename_fav(&mut self, list: FavList, old: &str, new: &str) {
+        for v in self.all_fav_lists(list) {
             for k in v.iter_mut() {
                 if k == old {
                     *k = new.to_string();
                 }
             }
+            // A case-only script rename could leave a duplicate.
+            let mut seen = std::collections::HashSet::new();
+            v.retain(|k| seen.insert(k.clone()));
         }
     }
 
-    /// A snippet was deleted: its stars and pin go too.
-    pub(super) fn forget_fav_snippet(&mut self, name: &str) {
-        for p in &mut self.s.projects {
-            p.fav_snippets.retain(|k| k != name);
+    /// A snippet or script was deleted: its stars and pin go too.
+    pub(super) fn forget_fav(&mut self, list: FavList, key: &str) {
+        for v in self.all_fav_lists(list) {
+            v.retain(|k| k != key);
         }
-        self.s.pinned_snippets.retain(|k| k != name);
     }
 
     /// The favourites in display order: snippets, then scripts, each sorted by name.
@@ -150,11 +166,21 @@ impl App {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 line = ACCENT_HI;
             }
+            // The top edge follows the pointer (keeping the offset it was grabbed at), so going
+            // past the cap and coming back doesn't leave the edge lagging away from the cursor.
+            let grab_id = egui::Id::unique("favorites_resize_grab");
+            if h.drag_started() {
+                if let Some(p) = h.interact_pointer_pos() {
+                    ui.ctx().data_mut(|d| d.insert_temp(grab_id, p.y - rect.top()));
+                }
+            }
             if h.dragged() {
-                // Dragging up grows it (clamped when laid out). From the shown height, so a saved
-                // height above the cap doesn't need dragging back first.
-                let max = ui.ctx().content_rect().height();
-                self.s.favorites_h = (rect.height() - h.drag_delta().y).clamp(MIN_H, max);
+                if let Some(p) = h.interact_pointer_pos() {
+                    let grab = ui.ctx().data(|d| d.get_temp::<f32>(grab_id)).unwrap_or(0.0);
+                    // Clamped to the 60% cap when laid out (favorites_height).
+                    let max = ui.ctx().content_rect().height();
+                    self.s.favorites_h = (rect.bottom() - (p.y - grab)).clamp(MIN_H, max);
+                }
             }
         }
         ui.painter().hline(rect.x_range(), rect.top(), Stroke::new(1.0, line));
@@ -227,7 +253,7 @@ impl App {
                 // Right side: the pin (pinned to every project), then the ↵ mark.
                 let mut right = 8.0;
                 if pinned {
-                    paint_pin_icon(p, egui::Rect::from_center_size(egui::pos2(r.right() - 14.0, r.center().y), Vec2::splat(12.0)), TEXT_DIM);
+                    paint_pin_icon(p, egui::Rect::from_center_size(egui::pos2(r.right() - 14.0, r.center().y), Vec2::splat(12.0)), TEXT_FAINT);
                     right += 18.0;
                 }
                 if !mark.is_empty() {
@@ -265,6 +291,15 @@ impl App {
             }
         });
 
+        // A double-click is two clicks: the second one (soon after) doesn't run it again.
+        if pick.is_some() {
+            let now = std::time::Instant::now();
+            if self.fav_last_pick.is_some_and(|t| now.duration_since(t) < Duration::from_millis(250)) {
+                pick = None;
+            } else {
+                self.fav_last_pick = Some(now);
+            }
+        }
         match pick {
             Some(Fav::Snippet(i)) => self.insert_snippet(i),
             Some(Fav::Script(i)) => {

@@ -218,7 +218,7 @@ impl App {
             ui.add_space(6.0);
         }
         if let Some((old, new)) = renamed {
-            self.rename_fav_snippet(&old, &new);
+            self.rename_fav(FavList::Snippets, &old, &new);
         }
         if let Some(i) = star {
             let name = self.s.snippets[i].name.clone();
@@ -228,7 +228,7 @@ impl App {
             let sn = self.s.snippets.remove(i);
             // Its stars go too, unless another snippet has the same name.
             if !self.s.snippets.iter().any(|o| o.name == sn.name) {
-                self.forget_fav_snippet(&sn.name);
+                self.forget_fav(FavList::Snippets, &sn.name);
             }
         }
         if let Some((a, b)) = swap {
