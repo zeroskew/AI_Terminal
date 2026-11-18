@@ -506,13 +506,19 @@ impl App {
                         .margin(egui::Margin::symmetric(8, 4)),
                 );
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    let q = self.header_query.clone();
-                    self.search_this_session(&ctx, &q);
+                    let q = self.header_query.trim().to_string();
+                    if !q.is_empty() {
+                        if let Some(t) = self.active_tab_mut() {
+                            t.view.search.open = true;
+                            t.view.search.focus = false;
+                            t.view.search.query = q;
+                        }
+                    }
                 }
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                     self.header_query.clear();
                 }
-                edit.on_hover_text("Find text in this session's messages (Enter)");
+                edit.on_hover_text("Find text in this terminal (Enter)");
                 if let Some(url) = &github {
                     if widgets::icon_button(ui, Icon::GitHub, 26.0, TEXT_DIM, &format!("Open on GitHub: {url}")).clicked() {
                         crate::links::open_url(url);

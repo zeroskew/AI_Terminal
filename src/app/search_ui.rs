@@ -14,9 +14,6 @@ pub(super) struct SearchUi {
     searched: Option<(bool, u32)>,
     /// Conversations whose matches are all shown (else the first few).
     expanded: std::collections::HashSet<String>,
-    /// Opened from the header's search box: only the current session, whatever the saved
-    /// "All sessions" setting is (until the checkbox is clicked).
-    this_session: bool,
 }
 
 impl SearchUi {
@@ -84,27 +81,6 @@ impl App {
         }
     }
 
-    /// The header's search box: finds `q` in the active session's transcript (the Search window,
-    /// limited to this session), or in its terminal (the find bar) when it has no transcript.
-    pub(super) fn search_this_session(&mut self, ctx: &egui::Context, q: &str) {
-        let q = q.trim();
-        if q.is_empty() {
-            return;
-        }
-        if self.active_target().is_none() {
-            if let Some(t) = self.active_tab_mut() {
-                t.view.search.open = true;
-                t.view.search.focus = false;
-                t.view.search.query = q.to_string();
-            }
-            return;
-        }
-        let st = self.search_ui.get_or_insert_with(Default::default);
-        st.query = q.to_string();
-        st.this_session = true;
-        self.run_search(ctx);
-    }
-
     fn session_by_agent(&self, agent_id: &str) -> Option<SessInfo> {
         if let Some(t) = self.tabs.iter().find(|t| t.sess.agent_id.as_deref() == Some(agent_id)) {
             return Some(SessInfo { name: t.sess.display_name(), project: t.project.clone(), profile: t.sess.profile.clone(), live: t.sess.exited.is_none(), archived: false, later: false });
@@ -136,8 +112,7 @@ impl App {
     }
 
     pub(super) fn run_search(&mut self, ctx: &egui::Context) {
-        let this_session = self.search_ui.as_ref().is_some_and(|st| st.this_session);
-        let all = (self.s.search_all && !this_session) || self.active_target().is_none();
+        let all = self.s.search_all || self.active_target().is_none();
         let targets = if all { self.all_targets() } else { self.active_target().into_iter().collect() };
         let days = self.s.search_days;
         let Some(st) = self.search_ui.as_mut() else { return };
@@ -183,12 +158,10 @@ impl App {
         let job = st.job.clone();
         let searched = st.searched;
         let mut expanded = std::mem::take(&mut st.expanded);
-        let this_session = st.this_session;
 
         let active = self.active_target();
         let active_name = self.active_tab().map(|t| t.sess.display_name());
-        let mut all = self.s.search_all && !this_session;
-        let mut all_changed = false;
+        let mut all = self.s.search_all;
         let mut days = self.s.search_days;
         let mut go = false;
         let mut close = false;
@@ -244,7 +217,6 @@ impl App {
                     let tip = if forced { "No session with a Claude / Codex / Antigravity conversation is open, so every session is searched" } else { "Search every session in every project (running, listed and archived); off = only the current session" };
                     if ui.add_enabled(!forced, egui::Checkbox::new(&mut shown, "All sessions")).on_hover_text(tip).on_disabled_hover_text(tip).changed() {
                         all = shown;
-                        all_changed = true;
                     }
                     if !(all || forced) {
                         if let Some(n) = &active_name {
@@ -370,16 +342,11 @@ impl App {
                 });
             });
 
-        if all_changed {
+        if all != self.s.search_all || days != self.s.search_days {
             self.s.search_all = all;
-        }
-        if days != self.s.search_days {
             self.s.search_days = days;
         }
         if let Some(st) = self.search_ui.as_mut() {
-            if all_changed {
-                st.this_session = false;
-            }
             st.query = query;
             st.expanded = expanded;
         }
