@@ -6,3 +6,4 @@ run.log
 /backups
 .claude/settings.local.json
 !screenshots/*.png
+/scripts

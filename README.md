@@ -190,9 +190,7 @@ after saving.
   `scripts` folder next to `ai_terminal.exe`, run in the background in the current project (no
   session): a small panel at the bottom right shows the output, takes typed answers when the
   script asks something, and has Stop / Run again; a toast says when it's done. The palette shows each script's first comment
-  line. The folder is created on first use with a sample, "Commit and push": one small Claude Haiku
-  call (`claude -p`, no tools, short system prompt, ~1.5k tokens) writes the message from the
-  diff, then it asks before committing and pushing. Options > Scripts (or "Edit scripts…" in the
+  line. The folder is created empty on first use. Options > Scripts (or "Edit scripts…" in the
   palette) edits them in place: rename, Save, Revert, Delete, open in your editor, add new ones.
   Or ask an agent to write one: **Copy prompt** there copies a starter request with the folder and
   conventions filled in; paste it into a session and say what the script should do.

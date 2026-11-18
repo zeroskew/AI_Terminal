@@ -424,11 +424,7 @@ impl Default for Settings {
             auto_update: true,
             update_on_startup: true,
             update_periodic: false,
-            snippets: vec![
-                Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true, favorite: false },
-                Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true, favorite: false },
-                Snippet { name: "Explain this error".into(), text: "Explain this error and suggest the smallest fix:\n".into(), send: false, favorite: false },
-            ],
+            snippets: Vec::new(),
             version: 8,
         }
     }

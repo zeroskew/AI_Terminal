@@ -19,19 +19,16 @@ pub(super) struct Script {
 /// File types the palette lists.
 const KINDS: [&str; 4] = ["ps1", "cmd", "bat", "py"];
 
-const SAMPLE_NAME: &str = "Commit and push.ps1";
-const SAMPLE: &str = include_str!("../../assets/scripts/Commit and push.ps1");
-
 /// `<exe folder>\scripts`.
 pub(super) fn scripts_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("scripts"))).unwrap_or_else(|| PathBuf::from("scripts"))
 }
 
-/// Lists the scripts, sorted by name. Creates the folder with a sample the first time.
+/// Lists the scripts, sorted by name. Creates the folder the first time.
 fn scan() -> Vec<Script> {
     let dir = scripts_dir();
-    if !dir.exists() && std::fs::create_dir_all(&dir).is_ok() {
-        let _ = std::fs::write(dir.join(SAMPLE_NAME), SAMPLE);
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
     }
     let mut v: Vec<Script> = std::fs::read_dir(&dir)
         .into_iter()
