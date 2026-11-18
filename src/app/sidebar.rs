@@ -31,7 +31,7 @@ impl App {
             let project = match self.s.projects.iter().find(|p| norm(&p.path) == key) {
                 Some(p) => p.path.clone(),
                 None => {
-                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false, accent: None, image: None, background: None });
+                    self.s.projects.push(Project { name: project_name(&f.cwd), path: f.cwd.clone(), collapsed: true, in_tabs: false, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
                     f.cwd.clone()
                 }
             };
@@ -215,7 +215,7 @@ impl App {
         self.s.projects.retain(|x| x.path != p);
         if self.s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None });
+            self.s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
         }
         if self.s.selected_project.as_deref() == Some(p) {
             self.select_project(None);

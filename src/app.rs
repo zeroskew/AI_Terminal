@@ -59,6 +59,12 @@ pub struct Project {
     /// The project's own terminal background, overriding Options > Terminal when enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<term_theme::ProjectBg>,
+    /// Snippets (by name) in this project's Favourites panel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fav_snippets: Vec<String>,
+    /// Scripts (lowercase file names, like `script_models`) in this project's Favourites panel.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fav_scripts: Vec<String>,
 }
 
 impl Project {
@@ -317,8 +323,9 @@ pub struct Settings {
     pub snippets: Vec<Snippet>,
     /// Height of the sidebar's Favourites panel (drag its top edge).
     pub favorites_h: f32,
-    /// Scripts in the sidebar's Favourites panel (lowercase file names, like `script_models`).
-    pub fav_scripts: Vec<String>,
+    /// Favourites pinned to every project's Favourites panel: snippet names, script keys.
+    pub pinned_snippets: Vec<String>,
+    pub pinned_scripts: Vec<String>,
     /// Show estimated session cost in the list and header.
     pub show_cost: bool,
     /// What the session usage shows: "plan" (share of the subscription's 5-hour / weekly
@@ -411,7 +418,8 @@ impl Default for Settings {
             editor_custom: String::new(),
             show_cost: true,
             favorites_h: 160.0,
-            fav_scripts: Vec::new(),
+            pinned_snippets: Vec::new(),
+            pinned_scripts: Vec::new(),
             usage_as: "plan".into(),
             keep_sessions: 20,
             active_on_top: true,
@@ -459,8 +467,6 @@ pub struct Snippet {
     pub text: String,
     /// Press Enter after inserting.
     pub send: bool,
-    /// Listed in the sidebar's Favourites panel.
-    pub favorite: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -640,6 +646,8 @@ pub struct App {
     scripts_synced: bool,
     /// The scripts folder was read for the Favourites panel.
     scripts_scanned: bool,
+    /// Options > Snippets: (row, name) when its name box got focus, to move stars on rename.
+    snippet_name_before: Option<(usize, String)>,
     script_new_ext: String,
     /// Scripts running (or finished, until closed) in the background, each in a small panel.
     script_runs: Vec<scripts::ScriptRun>,
@@ -748,7 +756,7 @@ impl App {
         crate::hooks::watch(cc.egui_ctx.clone());
         if s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None });
+            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
         }
         images::cleanup_async(s.paste_keep_days, s.paste_limit_bytes());
         let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
@@ -817,6 +825,7 @@ impl App {
             script_drafts: Vec::new(),
             scripts_synced: false,
             scripts_scanned: false,
+            snippet_name_before: None,
             script_new_ext: "ps1".into(),
             script_runs: Vec::new(),
             agent_installs: None,
@@ -919,7 +928,7 @@ impl App {
             if w[0] == "--add-project" {
                 let dir = PathBuf::from(&w[1]);
                 if !app.s.projects.iter().any(|p| p.path == dir) {
-                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None });
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
                 }
                 app.s.selected_project = Some(dir);
             }
@@ -1539,7 +1548,7 @@ impl App {
     fn add_project(&mut self, ctx: &egui::Context) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Add project folder").pick_folder() {
             if !self.s.projects.iter().any(|p| p.path == dir) {
-                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None });
+                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
             }
             let _ = ctx;
             self.select_project(Some(dir));

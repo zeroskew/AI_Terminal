@@ -327,25 +327,17 @@ impl App {
         self.script_runs.retain(|r| !close.contains(&r.id));
     }
 
-    pub(super) fn toggle_fav_script(&mut self, key: String) {
-        if let Some(k) = self.s.fav_scripts.iter().position(|f| *f == key) {
-            self.s.fav_scripts.remove(k);
-        } else if !key.is_empty() {
-            self.s.fav_scripts.push(key);
-        }
-    }
-
-    /// The starred scripts that exist in the scripts folder (reads it once if the palette
-    /// hasn't yet).
+    /// The current project's starred scripts that exist in the scripts folder (reads it once if
+    /// the palette hasn't yet).
     pub(super) fn fav_script_list(&mut self) -> Vec<usize> {
-        if self.s.fav_scripts.is_empty() {
+        if self.fav_list(super::favorites::FavList::Scripts).is_empty() && self.s.pinned_scripts.is_empty() {
             return Vec::new();
         }
         if !self.scripts_scanned && self.scripts.is_empty() {
             self.scripts = scan();
         }
         self.scripts_scanned = true;
-        (0..self.scripts.len()).filter(|&i| script_key(&self.scripts[i].path).is_some_and(|k| self.s.fav_scripts.contains(&k))).collect()
+        (0..self.scripts.len()).filter(|&i| script_key(&self.scripts[i].path).is_some_and(|k| self.is_fav(super::favorites::FavList::Scripts, &k))).collect()
     }
 
     /// The scripts palette (Ctrl+Shift+R or the header button): filter, Enter = first match.
@@ -402,7 +394,7 @@ impl App {
                         row = row.on_hover_text("Uses this AI model. Change it in Edit scripts…");
                     }
                     let key = script_key(&sc.path).unwrap_or_default();
-                    let fav = self.s.fav_scripts.contains(&key);
+                    let fav = self.is_fav(super::favorites::FavList::Scripts, &key);
                     let sr = egui::Rect::from_center_size(egui::pos2(row.rect.right() - 20.0, row.rect.center().y), Vec2::splat(26.0));
                     if super::snippets::star_button(ui, sr, egui::Id::unique(("script_star", i)), fav).clicked() {
                         star = Some(key);
@@ -416,7 +408,7 @@ impl App {
             close = true;
         }
         if let Some(key) = star {
-            self.toggle_fav_script(key);
+            self.toggle_fav(super::favorites::FavList::Scripts, &key);
         }
         // A started script's answer box takes the keyboard, so the terminal doesn't.
         let mut started = false;

@@ -1,5 +1,6 @@
 //! Snippets: the palette, inserting into a session, and their Options page.
 
+use super::favorites::FavList;
 use super::*;
 
 /// One palette entry (snippets and scripts): bold name, a one-line monospace detail, and a
@@ -132,9 +133,10 @@ impl App {
             palette_scroll(ui, shown.len()).show_hinted(ui, |ui| {
                 for i in shown {
                     let sn = &self.s.snippets[i];
+                    let fav = self.is_fav(FavList::Snippets, &sn.name);
                     let row = palette_row(ui, &sn.name, sn.text.lines().next().unwrap_or(""), if sn.send { "↵ send" } else { "" }, 28.0);
                     let sr = egui::Rect::from_center_size(egui::pos2(row.rect.right() - 20.0, row.rect.center().y), Vec2::splat(26.0));
-                    if star_button(ui, sr, egui::Id::unique(("snippet_star", i)), sn.favorite).clicked() {
+                    if star_button(ui, sr, egui::Id::unique(("snippet_star", i)), fav).clicked() {
                         star = Some(i);
                     } else if row.clicked() {
                         pick = Some(i);
@@ -146,7 +148,8 @@ impl App {
             close = true;
         }
         if let Some(i) = star {
-            self.s.snippets[i].favorite = !self.s.snippets[i].favorite;
+            let name = self.s.snippets[i].name.clone();
+            self.toggle_fav(FavList::Snippets, &name);
         }
         if let Some(i) = pick {
             self.insert_snippet(i);
@@ -170,14 +173,34 @@ impl App {
         let mut remove = None;
         let mut swap = None;
         let n = self.s.snippets.len();
+        let project = if self.s.projects.is_empty() { String::new() } else { project_name(&self.current_project()) };
+        let mut star = None;
+        let mut renamed = None;
         for i in 0..n {
+            let fav = self.is_fav(FavList::Snippets, &self.s.snippets[i].name);
             egui::Frame::new().fill(CARD).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let sn = &mut self.s.snippets[i];
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut sn.name).hint_text("Name").desired_width(260.0));
+                    let te = ui.add(egui::TextEdit::singleline(&mut sn.name).hint_text("Name").desired_width(260.0));
+                    // Stars are kept by name: when an edit ends with a new name, they follow it.
+                    if te.gained_focus() {
+                        self.snippet_name_before = Some((i, sn.name.clone()));
+                    }
+                    if te.lost_focus() {
+                        if let Some((k, old)) = self.snippet_name_before.take() {
+                            if k == i && old != sn.name {
+                                renamed = Some((old, sn.name.clone()));
+                            }
+                        }
+                    }
                     ui.checkbox(&mut sn.send, "Press Enter after inserting");
-                    ui.checkbox(&mut sn.favorite, "Favourite").on_hover_text("List it in Favourites at the bottom of the sidebar");
+                    if !project.is_empty() {
+                        let mut on = fav;
+                        if ui.checkbox(&mut on, format!("Favourite in {project}")).on_hover_text("List it in this project's Favourites at the bottom of the sidebar (each project has its own)").changed() {
+                            star = Some(i);
+                        }
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Delete").clicked() {
                             remove = Some(i);
@@ -194,14 +217,25 @@ impl App {
             });
             ui.add_space(6.0);
         }
+        if let Some((old, new)) = renamed {
+            self.rename_fav_snippet(&old, &new);
+        }
+        if let Some(i) = star {
+            let name = self.s.snippets[i].name.clone();
+            self.toggle_fav(FavList::Snippets, &name);
+        }
         if let Some(i) = remove {
-            self.s.snippets.remove(i);
+            let sn = self.s.snippets.remove(i);
+            // Its stars go too, unless another snippet has the same name.
+            if !self.s.snippets.iter().any(|o| o.name == sn.name) {
+                self.forget_fav_snippet(&sn.name);
+            }
         }
         if let Some((a, b)) = swap {
             self.s.snippets.swap(a, b);
         }
         if ui.add(egui::Button::new(RichText::new("+ Add snippet").color(Color32::WHITE)).fill(ACCENT)).clicked() {
-            self.s.snippets.push(Snippet { name: format!("Snippet {}", n + 1), text: String::new(), send: false, favorite: false });
+            self.s.snippets.push(Snippet { name: format!("Snippet {}", n + 1), text: String::new(), send: false });
         }
     }
 }
