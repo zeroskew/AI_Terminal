@@ -168,7 +168,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Context").size(18.0).family(bold()).color(Color32::WHITE));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::close_button(ui).clicked() {
+                    if widgets::corner_close_button(ui, 20.0).clicked() {
                         close = true;
                     }
                 });

@@ -101,7 +101,7 @@ impl App {
         // egui hid, so dragging back seemed stuck until that hidden excess was used up.
         let area = egui::Modal::default_area(id).anchor(egui::Align2::CENTER_CENTER, self.options_offset).constrain(false);
         let mut drag_delta = Vec2::ZERO;
-        let m = egui::Modal::new(id).area(area).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(0)).show(ctx, |ui| {
+        let m = egui::Modal::new(id).area(area).backdrop_color(Color32::TRANSPARENT).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(0)).show(ctx, |ui| {
             ui.set_width(size.x);
             ui.set_height(size.y);
             // Invisible drag strip: the empty header row across the whole window, up to the close button
@@ -154,7 +154,10 @@ impl App {
                     const EDGE: f32 = 6.0;
                     let scroll_size = Vec2::new(ui.available_width() - EDGE, ui.available_height() - EDGE);
                     ui.allocate_ui_with_layout(scroll_size, Layout::top_down(Align::Min), |ui| {
-                        egui::ScrollArea::vertical().auto_shrink([false, false]).show_hinted(ui, |ui| {
+                        // The bar's track starts below the close button so the two don't overlap.
+                        let mut bar_rect = ui.max_rect();
+                        bar_rect.min.y = bar_rect.min.y.max(top.y + inset + close_w + 6.0);
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).scroll_bar_rect(bar_rect).show_hinted(ui, |ui| {
                             egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 22, top: 0, bottom: 18 }).show(ui, |ui| {
                                 ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
                                 match page_now {
@@ -474,7 +477,9 @@ impl App {
         });
         ui.horizontal(|ui| {
             ui.label("Placement");
+            ui.add_space(10.0);
             ui.radio_value(&mut self.s.preview_over_text, false, "Never over text").on_hover_text("Previews only go into the empty space right of the text (shrinking, or a few lines lower); with no room there is no inline preview - hover and the header strip still show it.");
+            ui.add_space(10.0);
             ui.radio_value(&mut self.s.preview_over_text, true, "Allow over text").on_hover_text("Previews stay next to their line and may cover the end of long lines.");
         });
         Self::opt_heading(ui, "PASTE FOLDER");
@@ -536,6 +541,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new("When I close the app").size(14.5).color(TEXT));
             for (v, label) in [("exit", "Exit it"), ("minimize", "Minimize it"), ("tray", "Hide to system tray")] {
+                ui.add_space(10.0);
                 ui.radio_value(&mut self.s.close_action, v.to_string(), label);
             }
         });

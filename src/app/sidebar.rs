@@ -841,5 +841,5 @@ fn section_header(ui: &mut Ui, title: &str, n: usize, open: bool) -> egui::Respo
     };
     ui.painter().add(egui::Shape::convex_polygon(pts, col, Stroke::NONE));
     ui.painter().text(egui::pos2(r.left() + 15.0, r.center().y), egui::Align2::LEFT_CENTER, format!("{title} ({n})"), egui::FontId::new(10.5, bold()), col);
-    resp.on_hover_text(if open { "Collapse" } else { "Expand" })
+    resp
 }

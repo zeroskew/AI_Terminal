@@ -253,6 +253,22 @@ pub fn close_button(ui: &mut Ui) -> Response {
     icon_button(ui, Icon::Close, CLOSE_SIZE, TEXT_DIM, "Close (Esc)")
 }
 
+/// The close button for a window whose frame has an inner `margin`: call it in a right-to-left
+/// layout inside the window's first (header) row. It keeps a slot in the row (so the other header
+/// items stay clear of it) but is drawn out in the frame's margin, CLOSE_INSET from the window's
+/// top and right edges: the same spot as in the Options window.
+pub fn corner_close_button(ui: &mut Ui, margin: f32) -> Response {
+    let shift = (margin - CLOSE_INSET).max(0.0);
+    let (slot, _) = ui.allocate_exact_size(Vec2::new((CLOSE_SIZE - shift).max(0.0), 0.0), Sense::hover());
+    let top = ui.max_rect().top();
+    let rect = egui::Rect::from_min_size(egui::pos2(slot.right() + shift - CLOSE_SIZE, top - shift), Vec2::splat(CLOSE_SIZE));
+    // A child that doesn't grow the row, with its own clip rect: windows clip their content to
+    // inside the margin.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt("corner_close"));
+    child.set_clip_rect(rect.expand(2.0).intersect(ui.ctx().content_rect()));
+    close_button(&mut child)
+}
+
 /// Frameless text button: dim text, a soft background only on hover (for secondary toolbar actions).
 pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
     let font = egui::FontId::new(13.0, egui::FontFamily::Proportional);

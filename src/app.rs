@@ -657,6 +657,8 @@ pub struct App {
     open_new_menu: bool,
     /// The Search window (open while Some).
     search_ui: Option<search_ui::SearchUi>,
+    /// The header's "Search this session" box.
+    header_query: String,
     /// The Check for updates dialog is open.
     update_dialog: bool,
     /// The update whose "downloaded" toast was shown (once per tag).
@@ -807,6 +809,7 @@ impl App {
             show_later: false,
             open_new_menu: std::env::args().any(|a| a == "--new-menu"),
             search_ui: None,
+            header_query: String::new(),
             update_dialog: std::env::args().any(|a| a == "--check-updates"),
             update_announced: None,
             opts_snapshot: None,

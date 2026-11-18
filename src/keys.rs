@@ -120,7 +120,7 @@ impl Cmd {
             Cmd::Find => KeyboardShortcut::new(cs, Key::F),
             Cmd::Snippets => KeyboardShortcut::new(cs, Key::S),
             Cmd::Scripts => KeyboardShortcut::new(cs, Key::R),
-            Cmd::SearchSessions => KeyboardShortcut::new(Modifiers::CTRL | Modifiers::ALT, Key::F),
+            Cmd::SearchSessions => KeyboardShortcut::new(c, Key::F),
         })
     }
 }

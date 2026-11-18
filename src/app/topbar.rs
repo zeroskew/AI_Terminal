@@ -499,6 +499,20 @@ impl App {
                     self.snippets_open = true;
                     self.snippet_focus = true;
                 }
+                let edit = ui.add(
+                    egui::TextEdit::singleline(&mut self.header_query)
+                        .hint_text("Search this session…")
+                        .desired_width(180.0)
+                        .margin(egui::Margin::symmetric(8, 4)),
+                );
+                if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    let q = self.header_query.clone();
+                    self.search_this_session(&ctx, &q);
+                }
+                if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                    self.header_query.clear();
+                }
+                edit.on_hover_text("Find text in this session's messages (Enter)");
                 if let Some(url) = &github {
                     if widgets::icon_button(ui, Icon::GitHub, 26.0, TEXT_DIM, &format!("Open on GitHub: {url}")).clicked() {
                         crate::links::open_url(url);

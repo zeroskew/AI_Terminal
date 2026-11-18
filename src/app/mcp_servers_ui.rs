@@ -85,7 +85,7 @@ impl App {
                 ui.label(RichText::new("MCP SERVERS").size(12.5).family(bold()).color(TEXT_DIM));
                 ui.label(RichText::new(project_name(&st.project)).size(12.5).color(TEXT));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::close_button(ui).clicked() {
+                    if widgets::corner_close_button(ui, 18.0).clicked() {
                         close = true;
                     }
                 });

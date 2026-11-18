@@ -116,7 +116,7 @@ impl App {
                 widgets::paint_icon(ui.painter(), Icon::Plugin, r.center(), 15.0, TEXT_DIM);
                 ui.label(RichText::new("PLUGINS").size(12.5).family(bold()).color(TEXT_DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::close_button(ui).clicked() {
+                    if widgets::corner_close_button(ui, 18.0).clicked() {
                         close = true;
                     }
                     let tip = if codex { "codex plugin marketplace upgrade" } else { "claude plugin marketplace update" };
