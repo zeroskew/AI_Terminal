@@ -259,7 +259,10 @@ pub struct Settings {
     /// Which row of that profile is the default: "" (plain), "unrestricted" or "settings".
     pub default_variant: String,
     pub font_size: f32,
-    pub ui_size: f32,
+    /// Zoom of the whole window (1.0 = 100%).
+    pub ui_scale: f32,
+    /// Whether UI Scale also zooms the terminal text; when off the terminal keeps its own font size.
+    pub scale_terminal: bool,
     pub code_font: String,
     pub inline_previews: bool,
     pub preview_rows: usize,
@@ -311,6 +314,8 @@ pub struct Settings {
     /// For "custom": a command using {file}, {line}, {col}.
     pub editor_custom: String,
     pub snippets: Vec<Snippet>,
+    /// Height of the sidebar's Favourite Snippets panel (drag its top edge).
+    pub fav_snippets_h: f32,
     /// Show estimated session cost in the list and header.
     pub show_cost: bool,
     /// What the session usage shows: "plan" (share of the subscription's 5-hour / weekly
@@ -364,7 +369,8 @@ impl Default for Settings {
             default_profile: crate::session::CLAUDE.into(),
             default_variant: String::new(),
             font_size: 15.0,
-            ui_size: 14.0,
+            ui_scale: 1.0,
+            scale_terminal: true,
             code_font: crate::fonts::DEFAULT_LIST.into(),
             inline_previews: true,
             preview_rows: 8,
@@ -401,6 +407,7 @@ impl Default for Settings {
             editor: "auto".into(),
             editor_custom: String::new(),
             show_cost: true,
+            fav_snippets_h: 140.0,
             usage_as: "plan".into(),
             keep_sessions: 20,
             active_on_top: true,
@@ -414,9 +421,9 @@ impl Default for Settings {
             update_on_startup: true,
             update_periodic: false,
             snippets: vec![
-                Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true },
-                Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true },
-                Snippet { name: "Explain this error".into(), text: "Explain this error and suggest the smallest fix:\n".into(), send: false },
+                Snippet { name: "Review my changes".into(), text: "Review the uncommitted changes in this repo for bugs and risky edits. Be specific: file:line, what's wrong, how to fix.".into(), send: true, favorite: false },
+                Snippet { name: "Commit".into(), text: "Commit the current changes with a clear message (summary line + short body).".into(), send: true, favorite: false },
+                Snippet { name: "Explain this error".into(), text: "Explain this error and suggest the smallest fix:\n".into(), send: false, favorite: false },
             ],
             version: 8,
         }
@@ -452,11 +459,14 @@ pub struct Snippet {
     pub text: String,
     /// Press Enter after inserting.
     pub send: bool,
+    /// Listed in the sidebar's Favourite Snippets area.
+    pub favorite: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OptPage {
     General,
+    Appearance,
     Terminal,
     Images,
     Snippets,
@@ -465,6 +475,10 @@ enum OptPage {
     Shortcuts,
     About,
 }
+
+/// Range of Options > Appearance > UI Scale.
+const UI_SCALE_MIN: f32 = 0.75;
+const UI_SCALE_MAX: f32 = 2.0;
 
 /// Fixed (not reassignable) keys and mouse actions, listed under Options > Shortcuts.
 const SHORTCUTS: &[(&str, &str)] = &[
@@ -569,6 +583,8 @@ pub struct App {
     options: Option<OptPage>,
     /// How far the Options window has been dragged from the screen centre.
     options_offset: Vec2,
+    /// Options > Appearance > UI Scale while its slider is being dragged (applied on release).
+    ui_scale_edit: Option<f32>,
     /// Options > Shortcuts is recording a new binding for this command.
     capturing: Option<keys::Cmd>,
     plugins: Option<PluginsUi>,
@@ -588,6 +604,8 @@ pub struct App {
     confirm_group: Option<(PathBuf, bool)>,
     /// Closing the window while sessions are working asks first.
     confirm_quit: bool,
+    /// "Clear history" in the header search box's dropdown asks first.
+    confirm_clear_find_history: bool,
     /// "Close Anyway" was picked: let the next close request through.
     quit_confirmed: bool,
     /// Plan usage limits (5-hour / weekly) from Claude's status line, and when they were read.
@@ -684,7 +702,9 @@ impl App {
         crate::titlebar::apply();
         let mut s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
         install_fonts(&cc.egui_ctx, &s.code_font);
-        apply_style(&cc.egui_ctx, s.ui_size);
+        apply_style(&cc.egui_ctx);
+        s.ui_scale = s.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+        cc.egui_ctx.set_zoom_factor(s.ui_scale);
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         if s.editor.is_empty() {
             s.editor = "auto".into();
@@ -735,7 +755,7 @@ impl App {
         });
         agents::COLOR_TAG_PROMPT.store(s.color_tag_prompt && s.color_tags, std::sync::atomic::Ordering::Relaxed);
         agents::NAME_SESSION_PROMPT.store(s.name_sessions, std::sync::atomic::Ordering::Relaxed);
-        let applied = (s.code_font.clone(), s.ui_size);
+        let applied = (s.code_font.clone(), s.ui_scale);
         let mut app = App {
             s,
             tabs: Vec::new(),
@@ -758,6 +778,7 @@ impl App {
             applied,
             options: None,
             options_offset: Vec2::ZERO,
+            ui_scale_edit: None,
             capturing: None,
             plugins: None,
             mcp_servers: None,
@@ -768,6 +789,7 @@ impl App {
             confirm_remove_project: None,
             confirm_group: None,
             confirm_quit: false,
+            confirm_clear_find_history: false,
             quit_confirmed: false,
             limits: None,
             limits_read: None,
@@ -1602,10 +1624,13 @@ impl eframe::App for App {
             crate::titlebar::apply();
             ctx.request_repaint_after(Duration::from_millis(250));
         }
-        if self.applied.0 != self.s.code_font || self.applied.1 != self.s.ui_size {
+        if self.applied.0 != self.s.code_font {
             install_fonts(&ctx, &self.s.code_font);
-            apply_style(&ctx, self.s.ui_size);
-            self.applied = (self.s.code_font.clone(), self.s.ui_size);
+            self.applied.0 = self.s.code_font.clone();
+        }
+        if self.applied.1 != self.s.ui_scale {
+            ctx.set_zoom_factor(self.s.ui_scale);
+            self.applied.1 = self.s.ui_scale;
         }
         self.cache.pump(&ctx);
         // egui hears of window focus only from Windows' focus messages; if it never had it, make
@@ -1630,7 +1655,7 @@ impl eframe::App for App {
             self.last_title = title;
         }
 
-        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.project_settings.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_group.is_some() || self.confirm_quit || self.snippets_open || self.scripts_open || self.update_dialog;
+        let modal_open = self.viewer.is_some() || self.options.is_some() || self.launch.is_some() || self.project_settings.is_some() || self.plugins.is_some() || self.mcp_servers.is_some() || self.confirm_clear.is_some() || self.model_switch.is_some() || self.confirm_close.is_some() || self.context_info.is_some() || self.confirm_remove_project.is_some() || self.confirm_group.is_some() || self.confirm_quit || self.confirm_clear_find_history || self.snippets_open || self.scripts_open || self.update_dialog;
         if !modal_open {
             self.shortcuts(&ctx);
             self.handle_drops(&ctx);
@@ -1660,7 +1685,9 @@ impl eframe::App for App {
         let project_bg = if home { None } else { self.s.projects.iter().find(|p| p.path == bg_project).and_then(|p| p.background.clone()) };
         let theme = self.s.term_theme.with_project_bg(project_bg.as_ref());
         egui::CentralPanel::default().frame(egui::Frame::new().fill(term_theme::c(theme.effective_background()))).show(ui, |ui| {
-            let opt = ViewOptions { font_size: self.s.font_size, theme: &theme, inline_previews: self.s.inline_previews, preview_max_px: self.s.preview_max_px, preview_over_text: self.s.preview_over_text, shift_enter_alt: self.s.shift_enter_alt, color_tags: self.s.color_tags };
+            // With "Scale the terminal" off, undo the window zoom so terminal text keeps its size.
+            let font_size = if self.s.scale_terminal { self.s.font_size } else { self.s.font_size / self.s.ui_scale };
+            let opt = ViewOptions { font_size, theme: &theme, inline_previews: self.s.inline_previews, preview_max_px: self.s.preview_max_px, preview_over_text: self.s.preview_over_text, shift_enter_alt: self.s.shift_enter_alt, color_tags: self.s.color_tags };
             let focus = std::mem::take(&mut self.focus_terminal) && !modal_open && self.renaming.is_none() && self.project_settings.is_none();
             let a = self.active;
             if home {
@@ -1723,6 +1750,7 @@ impl eframe::App for App {
         self.group_dialog(&ctx);
         self.project_settings_dialog(&ctx);
         self.quit_dialog(&ctx);
+        self.clear_find_history_dialog(&ctx);
         self.update_dialog(&ctx);
         self.show_toast(&ctx);
     }
@@ -1732,6 +1760,40 @@ impl App {
     /// Sessions still working on a task.
     fn busy_count(&self) -> usize {
         self.tabs.iter().filter(|t| t.sess.busy && t.sess.exited.is_none()).count()
+    }
+
+    /// "Clear search history?": Cancel | Clear.
+    fn clear_find_history_dialog(&mut self, ctx: &egui::Context) {
+        if !self.confirm_clear_find_history {
+            return;
+        }
+        let n = self.s.find_history.len();
+        let mut choice: Option<bool> = None;
+        let m = egui::Modal::new(egui::Id::unique("confirm_clear_find_history")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(20)).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.label(RichText::new("Clear search history?").size(18.0).family(bold()).color(Color32::WHITE));
+            ui.add_space(10.0);
+            let what = if n == 1 { "the recent search".to_string() } else { format!("all {n} recent searches") };
+            ui.label(RichText::new(format!("This removes {what} from the list.")).color(TEXT));
+            ui.add_space(14.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("Clear").color(Color32::WHITE)).fill(RED).min_size(Vec2::new(80.0, 28.0))).clicked() {
+                    choice = Some(true);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(Vec2::new(70.0, 28.0))).clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if m.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        if let Some(clear) = choice {
+            self.confirm_clear_find_history = false;
+            if clear {
+                self.s.find_history.clear();
+            }
+        }
     }
 
     /// "There is a running task": Cancel | Close Anyway.

@@ -33,7 +33,10 @@ pub fn code_font(size: f32) -> FontId {
     FontId::new(size, code())
 }
 
-pub fn apply_style(ctx: &egui::Context, ui_size: f32) {
+/// Base text size; Options > Appearance > UI Scale zooms the whole window on top of it.
+const UI_TEXT: f32 = 14.0;
+
+pub fn apply_style(ctx: &egui::Context) {
     let mut style = egui::Style::default();
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
@@ -77,11 +80,11 @@ pub fn apply_style(ctx: &egui::Context, ui_size: f32) {
     s.scroll.floating = true;
 
     use egui::TextStyle::*;
-    style.text_styles.insert(Body, FontId::proportional(ui_size));
-    style.text_styles.insert(Button, FontId::proportional(ui_size));
-    style.text_styles.insert(Small, FontId::proportional(ui_size - 2.5));
-    style.text_styles.insert(Heading, FontId::new(ui_size + 4.0, bold()));
-    style.text_styles.insert(Monospace, FontId::new(ui_size, code()));
+    style.text_styles.insert(Body, FontId::proportional(UI_TEXT));
+    style.text_styles.insert(Button, FontId::proportional(UI_TEXT));
+    style.text_styles.insert(Small, FontId::proportional(UI_TEXT - 2.5));
+    style.text_styles.insert(Heading, FontId::new(UI_TEXT + 4.0, bold()));
+    style.text_styles.insert(Monospace, FontId::new(UI_TEXT, code()));
     ctx.set_theme(egui::Theme::Dark);
     ctx.set_style_of(egui::Theme::Dark, style);
 }

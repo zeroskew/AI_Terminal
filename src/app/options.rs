@@ -127,7 +127,7 @@ impl App {
                         ui.label(RichText::new("OPTIONS").size(11.5).family(bold()).color(TEXT_DIM));
                     });
                     ui.add_space(14.0);
-                    for (p, label) in [(OptPage::General, "General"), (OptPage::Terminal, "Terminal"), (OptPage::Images, "Images"), (OptPage::Snippets, "Snippets"), (OptPage::Scripts, "Scripts"), (OptPage::Agents, "Agents"), (OptPage::Shortcuts, "Shortcuts"), (OptPage::About, "About")] {
+                    for (p, label) in [(OptPage::General, "General"), (OptPage::Appearance, "Appearance"), (OptPage::Terminal, "Terminal"), (OptPage::Images, "Images"), (OptPage::Snippets, "Snippets"), (OptPage::Scripts, "Scripts"), (OptPage::Agents, "Agents"), (OptPage::Shortcuts, "Shortcuts"), (OptPage::About, "About")] {
                         let sel = page_now == p;
                         let (r, resp) = ui.allocate_exact_size(Vec2::new(190.0, 34.0), Sense::click());
                         let painter = ui.painter();
@@ -164,6 +164,7 @@ impl App {
                                     OptPage::Terminal => self.options_terminal(ui),
                                     OptPage::Images => self.options_images(ui),
                                     OptPage::General => self.options_general(ui),
+                                    OptPage::Appearance => self.options_appearance(ui),
                                     OptPage::Shortcuts => self.options_shortcuts(ui),
                                     OptPage::Snippets => self.options_snippets(ui),
                                     OptPage::Scripts => self.options_scripts(ui),
@@ -694,11 +695,33 @@ impl App {
             .size(12.0)
             .color(TEXT_FAINT),
         );
-        Self::opt_heading(ui, "APPEARANCE");
+    }
+
+    pub(super) fn options_appearance(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new("Appearance").family(bold()).size(18.0).color(TEXT));
+
+        Self::opt_heading(ui, "SCALE");
         ui.horizontal(|ui| {
-            ui.label("UI size");
-            ui.add(egui::Slider::new(&mut self.s.ui_size, 11.0..=20.0).step_by(0.5));
+            ui.label("UI Scale");
+            // Shown in percent. While dragging, the value is held back and applied on release, so
+            // the window doesn't rescale under the pointer mid-drag.
+            let mut pct = (self.ui_scale_edit.unwrap_or(self.s.ui_scale) * 100.0).round();
+            let r = ui.add(egui::Slider::new(&mut pct, super::UI_SCALE_MIN * 100.0..=super::UI_SCALE_MAX * 100.0).step_by(5.0).suffix("%").fixed_decimals(0));
+            if r.dragged() {
+                self.ui_scale_edit = Some(pct / 100.0);
+            } else {
+                if r.changed() || r.drag_stopped() {
+                    self.s.ui_scale = pct / 100.0;
+                }
+                self.ui_scale_edit = None;
+            }
+            if ui.add_enabled(self.s.ui_scale != 1.0, egui::Button::new("Reset")).clicked() {
+                self.s.ui_scale = 1.0;
+            }
         });
+        ui.label(RichText::new("Zooms the whole window: text, buttons and panels.").size(12.0).color(TEXT_FAINT));
+        ui.add_space(4.0);
+        Self::opt_check(ui, &mut self.s.scale_terminal, "Scale the terminal too", "UI Scale also zooms terminal text. Turn off to keep the terminal at its own font size (Options > Terminal).");
     }
 
     /// About, in the style of ASM Test Bench's.

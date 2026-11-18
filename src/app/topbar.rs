@@ -530,7 +530,12 @@ impl App {
                 }
                 let mut hist_open = self.find_hist_open;
                 let popup = egui::Popup::from_response(&edit).open_bool(&mut hist_open).close_behavior(egui::PopupCloseBehavior::IgnoreClicks).align(egui::RectAlign::BOTTOM_START).show(|ui| {
-                    ui.set_min_width(edit.rect.width().max(240.0));
+                    // As wide as the longest entry (text + left pad + × button), between the box's
+                    // width and a cap; longer entries are cut with "…".
+                    let font = egui::FontId::new(13.5, egui::FontFamily::Proportional);
+                    let text_w = self.s.find_history.iter().map(|q| ui.painter().layout_no_wrap(q.clone(), font.clone(), TEXT).size().x).fold(0.0, f32::max);
+                    let min_w = edit.rect.width().max(240.0);
+                    ui.set_width((text_w + 8.0 + 30.0).clamp(min_w, 480.0));
                     if self.s.find_history.is_empty() {
                         ui.label(RichText::new("No recent searches").color(TEXT_FAINT));
                         return;
@@ -544,7 +549,7 @@ impl App {
                             if rresp.hovered() || xresp.hovered() {
                                 p.rect_filled(rr, 4.0, CARD_HI);
                             }
-                            let mut job = egui::text::LayoutJob::simple_singleline(q.clone(), egui::FontId::new(13.5, egui::FontFamily::Proportional), TEXT);
+                            let mut job = egui::text::LayoutJob::simple_singleline(q.clone(), font.clone(), TEXT);
                             job.wrap.max_width = (xr.left() - 4.0 - (rr.left() + 8.0)).max(20.0);
                             job.wrap.max_rows = 1;
                             job.wrap.break_anywhere = true;
@@ -566,7 +571,7 @@ impl App {
                         }
                     });
                     ui.separator();
-                    if ui.button(RichText::new("Clear history").color(TEXT_DIM)).clicked() {
+                    if super::status_bar::link_button(ui, "Clear history", "Forget all recent searches (asks first)") {
                         forget_all = true;
                         ui.close();
                     }
@@ -587,7 +592,7 @@ impl App {
                     self.s.find_history.remove(i);
                 }
                 if forget_all {
-                    self.s.find_history.clear();
+                    self.confirm_clear_find_history = true;
                 }
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
                     self.header_query.clear();

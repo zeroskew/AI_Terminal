@@ -477,9 +477,9 @@ pub fn paint_busy_ring(p: &egui::Painter, c: Pos2, radius: f32, t: f32) {
     p.circle_filled(h, 1.3, Color32::from_rgb(235, 248, 255));
 }
 
-/// `ScrollArea::show` that also paints a "more below" arrow at the bottom of the viewport while
-/// there is content scrolled out of view (the floating scroll bar is hidden until hovered, so
-/// otherwise nothing tells you the window scrolls).
+/// `ScrollArea::show` that also paints a thin "more below" shade at the bottom of the viewport
+/// while there is content scrolled out of view (the floating scroll bar is hidden until hovered,
+/// so otherwise nothing tells you the window scrolls).
 pub trait ScrollMoreHint {
     fn show_hinted<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R>;
 }
@@ -487,7 +487,7 @@ pub trait ScrollMoreHint {
 impl ScrollMoreHint for egui::ScrollArea {
     fn show_hinted<R>(self, ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> egui::scroll_area::ScrollAreaOutput<R> {
         let out = self.show(ui, add);
-        // The floating scroll bar shows while the pointer is over the area; the arrow steps aside
+        // The floating scroll bar shows while the pointer is over the area; the shade steps aside
         // then (fading in step with the bar) and comes back when the pointer leaves.
         let shown = ui.ctx().animate_bool(out.id.with("more_below"), !ui.rect_contains_pointer(out.inner_rect));
         let remaining = out.content_size.y - out.inner_rect.height() - out.state.clamped_offset().y;
@@ -496,7 +496,7 @@ impl ScrollMoreHint for egui::ScrollArea {
     }
 }
 
-/// Paints the "more below" arrow at the bottom of `rect`; `remaining` is how many points of
+/// Paints the "more below" shade at the bottom of `rect`; `remaining` is how many points of
 /// content are left below the viewport (it fades in over the first few points); `shown` (0..1)
 /// scales its opacity.
 fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
@@ -505,11 +505,9 @@ fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
         return;
     }
     let p = ui.painter().with_clip_rect(rect);
-    let a = |v: f32| (v * k) as u8;
-    // A soft fade over the bottom edge, then a round badge with a down chevron.
-    let fade = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 28.0), rect.right_bottom());
+    let fade = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 10.0), rect.right_bottom());
     let mut mesh = egui::Mesh::default();
-    let (top, bottom) = (Color32::TRANSPARENT, Color32::from_rgba_unmultiplied(0, 0, 0, a(110.0)));
+    let (top, bottom) = (Color32::TRANSPARENT, Color32::from_rgba_unmultiplied(0, 0, 0, (110.0 * k) as u8));
     mesh.colored_vertex(fade.left_top(), top);
     mesh.colored_vertex(fade.right_top(), top);
     mesh.colored_vertex(fade.left_bottom(), bottom);
@@ -517,12 +515,6 @@ fn paint_more_below(ui: &Ui, rect: Rect, remaining: f32, shown: f32) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(1, 3, 2);
     p.add(Shape::mesh(mesh));
-    let c = Pos2::new(rect.center().x, rect.bottom() - 14.0);
-    let bg = CARD_HI;
-    p.circle(c, 10.0, Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), a(235.0)), Stroke::new(1.0, Color32::from_rgba_unmultiplied(BORDER.r(), BORDER.g(), BORDER.b(), a(255.0))));
-    let col = Color32::from_rgba_unmultiplied(TEXT.r(), TEXT.g(), TEXT.b(), a(230.0));
-    let (w, h) = (4.5, 2.5);
-    p.add(Shape::line(vec![Pos2::new(c.x - w, c.y - h + 0.5), Pos2::new(c.x, c.y + h + 0.5), Pos2::new(c.x + w, c.y - h + 0.5)], Stroke::new(1.6, col)));
 }
 
 /// The accent colors offered for a project, tuned to read well on the dark bars.

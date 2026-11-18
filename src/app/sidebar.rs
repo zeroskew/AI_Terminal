@@ -348,11 +348,15 @@ impl App {
         const GUTTER: f32 = 6.0;
         // Only the panel's own area is reported as used: reporting the widened rect would make
         // the side panel grow by GUTTER every frame (it sizes itself to its content).
-        let panel_rect = ui.available_rect_before_wrap();
+        let full_rect = ui.available_rect_before_wrap();
+        // The Favourite Snippets panel takes the bottom; the list gets the rest.
+        let fav_h = self.fav_snippets_height(full_rect.height());
+        let panel_rect = egui::Rect::from_min_max(full_rect.min, egui::pos2(full_rect.max.x, full_rect.max.y - fav_h));
         let list_rect = egui::Rect::from_min_max(panel_rect.min, egui::pos2(panel_rect.max.x + GUTTER, panel_rect.max.y));
         let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list_rect));
         list_ui.set_clip_rect(list_rect.intersect(ui.clip_rect().expand2(Vec2::new(GUTTER, 0.0))));
-        ui.advance_cursor_after_rect(panel_rect);
+        self.fav_snippets_panel(ui, egui::Rect::from_min_max(egui::pos2(full_rect.min.x, panel_rect.max.y), full_rect.max));
+        ui.advance_cursor_after_rect(full_rect);
         egui::ScrollArea::vertical().content_margin(egui::Margin { right: GUTTER as i8, ..Default::default() }).auto_shrink([false, false]).show_hinted(&mut list_ui, |ui| {
             let mut last_group: Option<String> = None;
             let mut pinned_rects: Vec<(u64, egui::Rect)> = Vec::new();
