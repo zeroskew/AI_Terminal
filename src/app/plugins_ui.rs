@@ -2,6 +2,7 @@
 //! catalogue, sources and install / uninstall.
 
 use super::*;
+use std::collections::HashMap;
 
 /// The providers the window has tabs for: (kind, tab label, CLI name).
 const PROVIDERS: [(Kind, &str, &str); 2] = [(Kind::Claude, "Claude Code", "claude"), (Kind::Codex, "Codex", "codex")];
@@ -11,6 +12,39 @@ fn provider_icon(kind: Kind) -> (Icon, Color32) {
         Kind::Codex => (Icon::Codex, Color32::from_rgb(200, 204, 212)),
         _ => (Icon::Sparkle, Color32::from_rgb(217, 119, 87)),
     }
+}
+
+/// A Claude Code plugin's context cost, measured once from its installed copy (or the
+/// marketplace checkout when not installed); `None` when there's no local copy.
+fn plugin_cost(costs: &mut HashMap<String, Option<plugins::TokenCost>>, installed: &HashMap<String, Vec<plugins::Installed>>, p: &plugins::Plugin) -> Option<plugins::TokenCost> {
+    costs
+        .entry(p.id().to_string())
+        .or_insert_with(|| {
+            let inst = installed.get(p.id()).into_iter().flatten().filter_map(|i| i.path.clone());
+            inst.chain(p.dir.clone()).find_map(|d| plugins::token_cost(&d))
+        })
+        .clone()
+}
+
+/// Claude Code's own figures for a plugin (`claude plugin details`), started on first ask;
+/// `None` while it runs. Installed plugins are looked up by id (in their project for project
+/// installs), others loaded from the marketplace checkout.
+fn plugin_cli_cost(slots: &mut HashMap<String, plugins::DetailsRef>, cli: &(String, Vec<String>), cwd: &Path, installed: &HashMap<String, Vec<plugins::Installed>>, p: &plugins::Plugin, ctx: &egui::Context) -> Option<Result<plugins::CliCost, String>> {
+    let slot = slots.entry(p.id().to_string()).or_insert_with(|| {
+        let inst = installed.get(p.id());
+        let cwd = inst.and_then(|v| if v.iter().any(|i| i.scope == "user") { None } else { v.iter().find_map(|i| i.project.clone()) }).unwrap_or_else(|| cwd.to_path_buf());
+        plugins::details_async(&cli.0, &cli.1, p.id(), &p.name, p.dir.as_deref(), inst.is_some(), &cwd, ctx.clone())
+    });
+    let r = slot.lock().unwrap().clone();
+    r
+}
+
+/// Tokens a plugin adds to every request: Claude Code's figure once fetched, else the estimate.
+fn always_tokens(costs: &mut HashMap<String, Option<plugins::TokenCost>>, cli_costs: &HashMap<String, plugins::DetailsRef>, installed: &HashMap<String, Vec<plugins::Installed>>, p: &plugins::Plugin) -> Option<u64> {
+    if let Some(Ok(c)) = cli_costs.get(p.id()).and_then(|s| s.lock().unwrap().clone()) {
+        return Some(c.always);
+    }
+    plugin_cost(costs, installed, p).map(|c| c.always)
 }
 
 impl App {
@@ -50,6 +84,9 @@ impl App {
             st.selected = st.catalogue.first().map(|x| x.id().to_string());
         }
         st.load_error = None;
+        st.costs.clear();
+        st.enablement.clear();
+        st.cli_costs.clear();
     }
 
     /// The plugins window (a modal).
@@ -95,6 +132,9 @@ impl App {
                     }
                 }
                 st.installed = plugins::installed();
+                st.costs.clear();
+                st.enablement.clear();
+                st.cli_costs.clear();
             }
         }
         let screen = ctx.content_rect();
@@ -105,7 +145,11 @@ impl App {
         let mut refresh = false;
         let mut source_cmd: Option<Vec<String>> = None;
         let mut switch_to: Option<Kind> = None;
+        let projects: Vec<PathBuf> = self.s.projects.iter().map(|p| p.path.clone()).collect();
         let st = self.plugins.as_mut().unwrap();
+        st.projects = projects;
+        st.current_project = project.clone();
+        st.cli = (cli.clone(), cli_args.clone());
         let running = st.job.lock().unwrap().running;
         let loading = st.loading.is_some();
         let m = egui::Modal::new(egui::Id::unique("plugins")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(18)).show(ctx, |ui| {
@@ -185,6 +229,10 @@ impl App {
         if let Some(args) = run {
             st.show_log = true;
             plugins::run(&st.job, cli_name, &cli, &cli_args, args, &project, ctx.clone());
+        }
+        if let Some((args, cwd)) = st.toggle.take() {
+            st.show_log = true;
+            plugins::run(&st.job, cli_name, &cli, &cli_args, args, &cwd, ctx.clone());
         }
         if let Some(args) = source_cmd {
             // Reloads the sources and the catalogue when it finishes.
@@ -343,14 +391,24 @@ impl App {
                         } else if resp.hovered() {
                             painter.rect_filled(r, 0.0, CARD);
                         }
+                        // Right side, right to left: installed dot, token estimate, BUNDLE badge.
+                        let mut right = r.right() - 34.0;
+                        if let Some(n) = (!codex).then(|| always_tokens(&mut st.costs, &st.cli_costs, installed, p)).flatten() {
+                            let g = painter.layout_no_wrap(format!("~{} tok", crate::cost::fmt_tokens(n)), egui::FontId::proportional(12.0), TEXT_FAINT);
+                            right -= g.size().x;
+                            painter.galley(egui::pos2(right, r.center().y - g.size().y / 2.0), g, TEXT_FAINT);
+                            right -= 10.0;
+                        }
+                        let badge_left = right - 66.0;
                         let mut job = egui::text::LayoutJob::simple_singleline(p.name.clone(), egui::FontId::proportional(14.0), TEXT);
-                        job.wrap.max_width = r.width() - 130.0;
+                        job.wrap.max_width = (if p.is_bundle() { badge_left } else { right }) - r.left() - 22.0;
                         job.wrap.max_rows = 1;
                         job.wrap.break_anywhere = true;
                         let g = ui.fonts_mut(|f| f.layout_job(job));
+                        let painter = ui.painter();
                         painter.galley(egui::pos2(r.left() + 14.0, r.center().y - g.size().y / 2.0), g, TEXT);
                         if p.is_bundle() {
-                            let br = egui::Rect::from_min_size(egui::pos2(r.right() - 100.0, r.center().y - 10.0), Vec2::new(66.0, 20.0));
+                            let br = egui::Rect::from_min_size(egui::pos2(badge_left, r.center().y - 10.0), Vec2::new(66.0, 20.0));
                             painter.rect_filled(br, 3.0, BADGE_BLUE);
                             painter.text(br.center(), egui::Align2::CENTER_CENTER, "BUNDLE", egui::FontId::new(11.5, bold()), Color32::WHITE);
                         }
@@ -409,6 +467,158 @@ impl App {
                         ui.label(RichText::new("No description (the source doesn't publish one).").size(14.5).color(TEXT_FAINT));
                     } else {
                         ui.label(RichText::new(&p.description).size(14.5).color(TEXT));
+                    }
+                    if let Some(inst) = installed.get(p.id()).filter(|_| !codex) {
+                        section(ui, "ENABLED");
+                        let id = p.id().to_string();
+                        let en = st.enablement.entry(id.clone()).or_insert_with(|| plugins::enablement(&id, inst, &st.projects)).clone();
+                        let on_off = |ui: &mut Ui, on: bool| {
+                            if on {
+                                widgets::pill(ui, "ON", Color32::WHITE, Color32::from_rgb(30, 90, 50));
+                            } else {
+                                widgets::pill(ui, "OFF", TEXT_DIM, CARD_HI);
+                            }
+                        };
+                        let toggle_args = |on: bool, scope: &str| vec!["plugin".into(), if on { "disable" } else { "enable" }.into(), id.clone(), "--scope".into(), scope.into()];
+                        if en.user_install {
+                            ui.horizontal(|ui| {
+                                let on = en.user.unwrap_or(true);
+                                on_off(ui, on);
+                                ui.label(RichText::new("System wide").family(bold()).color(TEXT)).on_hover_text("~/.claude/settings.json: the default for every project");
+                                let b = egui::Button::new(if on { "Turn off" } else { "Turn on" });
+                                if ui.add_enabled(!running, b).on_hover_text(format!("{cli_name} plugin {} {id} --scope user", if on { "disable" } else { "enable" })).clicked() {
+                                    st.toggle = Some((toggle_args(on, "user"), st.current_project.clone()));
+                                }
+                            });
+                        } else {
+                            ui.label(RichText::new("Not installed system wide: only in the projects below.").color(TEXT_DIM));
+                        }
+                        if en.projects.is_empty() {
+                            ui.label(RichText::new("No projects to show.").color(TEXT_FAINT));
+                        } else {
+                            ui.add_space(6.0);
+                            egui::Grid::new(("plugin_projects", &id)).num_columns(4).spacing([14.0, 6.0]).striped(true).show(ui, |ui| {
+                                for ps in &en.projects {
+                                    on_off(ui, ps.on);
+                                    let name = ps.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| ps.path.display().to_string());
+                                    let current = ps.path == st.current_project;
+                                    let label = RichText::new(if current { format!("{name}  (current)") } else { name }).color(TEXT);
+                                    ui.label(if current { label.family(bold()) } else { label }).on_hover_text(ps.path.display().to_string());
+                                    let (from, tip) = match ps.from {
+                                        plugins::Layer::Local => ("your setting for this project", ".claude/settings.local.json (personal, not shared)"),
+                                        plugins::Layer::Project => ("project settings", ".claude/settings.json (shared with everyone on the project)"),
+                                        plugins::Layer::User => ("system wide", "~/.claude/settings.json"),
+                                        plugins::Layer::Default => ("default", "Not set anywhere; installed plugins are on"),
+                                    };
+                                    let from = if ps.installed_here { format!("{from}  ·  installed here") } else { from.to_string() };
+                                    ui.label(RichText::new(from).color(TEXT_DIM)).on_hover_text(tip);
+                                    ui.horizontal(|ui| {
+                                        let b = egui::Button::new(if ps.on { "Turn off here" } else { "Turn on here" });
+                                        let tip = format!("{cli_name} plugin {} {id} --scope local  (in {})", if ps.on { "disable" } else { "enable" }, ps.path.display());
+                                        if ui.add_enabled(!running, b).on_hover_text(tip).clicked() {
+                                            st.toggle = Some((toggle_args(ps.on, "local"), ps.path.clone()));
+                                        }
+                                        if ps.from == plugins::Layer::Local {
+                                            let r = ui.add_enabled(!running, egui::Button::new("Reset")).on_hover_text("Remove your setting for this project, going back to the project / system-wide one");
+                                            if r.clicked() {
+                                                let mut job = st.job.lock().unwrap();
+                                                match plugins::clear_local_override(&ps.path, &id) {
+                                                    Ok(()) => job.log.push(format!("Cleared {id} from {}", ps.path.join(".claude").join("settings.local.json").display())),
+                                                    Err(e) => job.log.push(format!("Couldn't reset {id} in {}: {e}", ps.path.display())),
+                                                }
+                                                st.enablement.remove(&id);
+                                            }
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                        }
+                    }
+                    if !codex {
+                        section(ui, "CONTEXT COST");
+                        let ctx = ui.ctx().clone();
+                        let cli = plugin_cli_cost(&mut st.cli_costs, &st.cli, &st.current_project, installed, p, &ctx);
+                        match plugin_cost(&mut st.costs, installed, p) {
+                            None => {
+                                ui.label(RichText::new("Unknown: there's no local copy to measure until it's installed.").color(TEXT_FAINT));
+                            }
+                            Some(c) => {
+                                let t = crate::cost::fmt_tokens;
+                                let every_tip = "The names and descriptions of its skills, commands and agents, listed so the model knows when to use them.";
+                                match &cli {
+                                    Some(Ok(cc)) => {
+                                        ui.label(RichText::new(format!("~{} tokens in every request", t(cc.always))).size(14.5).color(TEXT)).on_hover_text(every_tip);
+                                        if cc.on_invoke() > 0 {
+                                            ui.label(RichText::new(format!("~{} more when its skills, commands or agents are used (each time one fires)", t(cc.on_invoke()))).color(TEXT_DIM));
+                                        }
+                                        ui.label(RichText::new(format!("From Claude Code ({} plugin details).", cli_name)).size(12.0).color(TEXT_FAINT));
+                                        if !cc.components.is_empty() {
+                                            ui.add_space(4.0);
+                                            egui::Grid::new(("plugin_components", p.id())).num_columns(3).spacing([24.0, 3.0]).striped(true).show(ui, |ui| {
+                                                for h in ["Component", "Every request", "When used"] {
+                                                    ui.label(RichText::new(h).size(12.0).family(bold()).color(TEXT_DIM));
+                                                }
+                                                ui.end_row();
+                                                for (name, a, b) in &cc.components {
+                                                    ui.label(RichText::new(name).color(TEXT));
+                                                    ui.label(RichText::new(format!("~{}", t(*a))).color(TEXT));
+                                                    ui.label(RichText::new(format!("~{}", t(*b))).color(TEXT_DIM));
+                                                    ui.end_row();
+                                                }
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        ui.label(RichText::new(format!("~{} tokens in every request", t(c.always))).size(14.5).color(TEXT)).on_hover_text(every_tip);
+                                        if c.on_use > 0 {
+                                            ui.label(RichText::new(format!("~{} more when its skills, commands or agents are used (full text, loaded on demand)", t(c.on_use))).color(TEXT_DIM));
+                                        }
+                                        match &cli {
+                                            None => {
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::Spinner::new().size(12.0));
+                                                    ui.label(RichText::new("Estimated here; asking Claude Code for its figures…").size(12.0).color(TEXT_FAINT));
+                                                });
+                                            }
+                                            Some(Err(e)) => {
+                                                ui.label(RichText::new("Estimated from its files.").size(12.0).color(TEXT_FAINT)).on_hover_text(format!("{cli_name} plugin details: {e}"));
+                                            }
+                                            Some(Ok(_)) => {}
+                                        }
+                                    }
+                                }
+                                let parts: Vec<String> = match &cli {
+                                    // Claude Code's inventory ("Skills", "LSP servers", …), singular for 1.
+                                    Some(Ok(cc)) if !cc.inventory.is_empty() => cc
+                                        .inventory
+                                        .iter()
+                                        .filter(|(_, n)| *n > 0)
+                                        .map(|(kind, n)| {
+                                            let kind = if kind.chars().nth(1).is_some_and(|ch| ch.is_lowercase()) { kind.to_lowercase() } else { kind.clone() };
+                                            format!("{n} {}", if *n == 1 { kind.trim_end_matches('s') } else { &kind })
+                                        })
+                                        .collect(),
+                                    _ => {
+                                        let mut v: Vec<String> = [(c.skills, "skill"), (c.commands, "command"), (c.agents, "agent"), (c.mcp_servers, "MCP server")]
+                                            .iter()
+                                            .filter(|(n, _)| *n > 0)
+                                            .map(|(n, w)| format!("{n} {w}{}", if *n == 1 { "" } else { "s" }))
+                                            .collect();
+                                        if c.hooks {
+                                            v.push("hooks".into());
+                                        }
+                                        v
+                                    }
+                                };
+                                if !parts.is_empty() {
+                                    ui.label(RichText::new(parts.join("  ·  ")).color(TEXT_DIM));
+                                }
+                                if c.mcp_servers > 0 {
+                                    ui.label(RichText::new("MCP tool definitions add more, sized only once the server runs (see the context pill in a session).").color(TEXT_FAINT));
+                                }
+                            }
+                        }
                     }
                     if !p.author.is_empty() {
                         section(ui, "AUTHOR");
@@ -480,8 +690,22 @@ impl App {
                 "Working…".to_string()
             } else if loading {
                 "Loading…".to_string()
-            } else {
+            } else if codex || installed.is_empty() {
                 format!("{} plugins available.", st.catalogue.len())
+            } else {
+                // The installed plugins' combined per-request cost (Claude Code's figures, asked
+                // for up front: there are only a few).
+                let ctx = ui.ctx().clone();
+                let total: u64 = st
+                    .catalogue
+                    .iter()
+                    .filter(|p| installed.contains_key(p.id()))
+                    .filter_map(|p| {
+                        plugin_cli_cost(&mut st.cli_costs, &st.cli, &st.current_project, installed, p, &ctx);
+                        always_tokens(&mut st.costs, &st.cli_costs, installed, p)
+                    })
+                    .sum();
+                format!("{} plugins available.  Installed plugins add ~{} tokens to every request.", st.catalogue.len(), crate::cost::fmt_tokens(total))
             };
             ui.label(RichText::new(status).color(TEXT_DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

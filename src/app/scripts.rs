@@ -111,6 +111,12 @@ impl App {
         }
     }
 
+    /// Whether a script is listed in the current project (not limited to other projects).
+    pub(super) fn script_in_project(&self, sc: &Script) -> bool {
+        let cur = self.current_project();
+        script_key(&sc.path).and_then(|k| self.s.script_projects.get(&k)).is_none_or(|ps| ps.is_empty() || ps.contains(&cur))
+    }
+
     /// The model picked for a script in Options > Scripts (None = the script's own default).
     fn script_model(&self, path: &Path) -> Option<ScriptModel> {
         self.s.script_models.get(&script_key(path)?).filter(|m| !m.model.is_empty()).cloned()
@@ -342,7 +348,7 @@ impl App {
             self.scripts = scan();
         }
         self.scripts_scanned = true;
-        (0..self.scripts.len()).filter(|&i| script_key(&self.scripts[i].path).is_some_and(|k| self.is_fav(super::favorites::FavList::Scripts, &k))).collect()
+        (0..self.scripts.len()).filter(|&i| self.script_in_project(&self.scripts[i]) && script_key(&self.scripts[i].path).is_some_and(|k| self.is_fav(super::favorites::FavList::Scripts, &k))).collect()
     }
 
     /// The scripts palette (Ctrl+Shift+R or the header button): filter, Enter = first match.
@@ -382,11 +388,14 @@ impl App {
             }
             ui.add_space(6.0);
             let f = self.script_filter.to_lowercase();
-            let shown: Vec<usize> = (0..self.scripts.len()).filter(|&i| f.is_empty() || self.scripts[i].name.to_lowercase().contains(&f) || self.scripts[i].desc.to_lowercase().contains(&f)).collect();
+            let here: Vec<usize> = (0..self.scripts.len()).filter(|&i| self.script_in_project(&self.scripts[i])).collect();
+            let shown: Vec<usize> = here.iter().copied().filter(|&i| f.is_empty() || self.scripts[i].name.to_lowercase().contains(&f) || self.scripts[i].desc.to_lowercase().contains(&f)).collect();
             if te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 pick = shown.first().copied();
             }
-            if self.scripts.is_empty() {
+            if here.is_empty() && !self.scripts.is_empty() {
+                ui.label(RichText::new(format!("No scripts for {project}. The others are limited to other projects (Edit scripts… > Projects).")).color(TEXT_FAINT));
+            } else if self.scripts.is_empty() {
                 ui.label(RichText::new("No scripts yet. Put .ps1, .cmd, .bat or .py files in the scripts folder (Open folder), or ask an agent to write one (Edit scripts… > Copy prompt).").color(TEXT_FAINT));
             }
             super::snippets::palette_scroll(ui, shown.len()).show_hinted(ui, |ui| {
@@ -733,6 +742,44 @@ fn effort_picker(ui: &mut Ui, i: usize, catalog: &agents::Catalog, models: &mut 
     });
 }
 
+/// The dropdown on a script's card for the projects it's listed in: all, or the ticked ones.
+fn project_picker(ui: &mut Ui, i: usize, projects: &[Project], scopes: &mut std::collections::HashMap<String, Vec<PathBuf>>, key: &str) {
+    let cur: Vec<PathBuf> = scopes.get(key).cloned().unwrap_or_default();
+    let names: Vec<&str> = projects.iter().filter(|p| cur.contains(&p.path)).map(|p| p.name.as_str()).collect();
+    let shown = match names.as_slice() {
+        [] if cur.is_empty() => "Projects: all".to_string(),
+        [] => "Projects: none open".to_string(),
+        [one] => format!("Project: {one}"),
+        more => format!("Projects: {}", more.len()),
+    };
+    let mut next = cur.clone();
+    let r = egui::ComboBox::from_id_salt(("script_projects", i)).selected_text(shown).width(170.0).show_ui(ui, |ui| {
+        if ui.selectable_label(next.is_empty(), "All projects").clicked() {
+            next.clear();
+        }
+        ui.separator();
+        for p in projects {
+            let mut on = next.contains(&p.path);
+            if ui.checkbox(&mut on, &p.name).on_hover_text(p.path.display().to_string()).changed() {
+                if on {
+                    next.push(p.path.clone());
+                } else {
+                    next.retain(|x| x != &p.path);
+                }
+            }
+        }
+    });
+    let tip = if names.len() > 1 { format!("Listed in: {}", names.join(", ")) } else { "The projects whose Scripts palette and Favourites list this script".to_string() };
+    r.response.on_hover_text(tip);
+    if next != cur {
+        if next.is_empty() {
+            scopes.remove(key);
+        } else {
+            scopes.insert(key.to_string(), next);
+        }
+    }
+}
+
 /// The AI model dropdown on a script's card: the script's own default, a model from one of the
 /// CLIs' lists, or a typed model id.
 fn model_picker(ui: &mut Ui, i: usize, catalog: &agents::Catalog, models: &mut std::collections::HashMap<String, ScriptModel>, key: &str) {
@@ -864,6 +911,7 @@ impl App {
         });
         ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (click it to keep it open)", DISMISS_AFTER.as_secs()));
         ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
+        ui.label(RichText::new("Projects limits a script to some projects: it's only listed in their Scripts palette and Favourites.").size(12.0).color(TEXT_FAINT));
         ui.label(RichText::new("Scripts that read $env:AI_TERMINAL_MODEL (and AI_TERMINAL_CLI) get a model picker: the Claude, Codex or Antigravity model you pick there is passed to them.").size(12.0).color(TEXT_FAINT));
         ui.add_space(8.0);
         let mut remove = None;
@@ -873,6 +921,8 @@ impl App {
         let mut renamed: Vec<(String, String)> = Vec::new();
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let models = &mut self.s.script_models;
+        let scopes = &mut self.s.script_projects;
+        let projects = &self.s.projects;
         for (i, d) in self.script_drafts.iter_mut().enumerate() {
             egui::Frame::new().fill(CARD).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -921,6 +971,9 @@ impl App {
                                     if let Some(m) = models.remove(&old) {
                                         models.insert(new.clone(), m);
                                     }
+                                    if let Some(ps) = scopes.remove(&old) {
+                                        scopes.insert(new.clone(), ps);
+                                    }
                                     renamed.push((old, new));
                                 }
                             }
@@ -928,10 +981,15 @@ impl App {
                         }
                     });
                 });
-                // Second line: the AI model (scripts that call one) and, collapsed, the description.
-                let ai_key = d.path.as_deref().and_then(script_key).filter(|_| uses_ai(&d.saved_text));
-                if ai_key.is_some() || !d.expanded {
+                // Second line: the projects it's listed in (once saved), the AI model (scripts that
+                // call one) and, collapsed, the description.
+                let key = d.path.as_deref().and_then(script_key);
+                let ai_key = key.clone().filter(|_| uses_ai(&d.saved_text));
+                if key.is_some() || !d.expanded {
                     ui.horizontal(|ui| {
+                        if let Some(key) = &key {
+                            project_picker(ui, i, projects, scopes, key);
+                        }
                         if let Some(key) = &ai_key {
                             model_picker(ui, i, &catalog, models, key);
                         }
@@ -963,6 +1021,7 @@ impl App {
             let d = self.script_drafts.remove(i);
             if let Some(key) = d.path.as_deref().and_then(script_key) {
                 self.s.script_models.remove(&key);
+                self.s.script_projects.remove(&key);
                 self.forget_fav(super::favorites::FavList::Scripts, &key);
             }
             if let Some(p) = d.path {

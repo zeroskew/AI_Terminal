@@ -345,6 +345,9 @@ pub struct Settings {
     /// The AI model per script (key: lowercase file name, e.g. "commit and push.ps1"), passed to it
     /// as AI_TERMINAL_CLI / AI_TERMINAL_MODEL / AI_TERMINAL_EFFORT. No entry = the script's own default.
     pub script_models: std::collections::HashMap<String, ScriptModel>,
+    /// Scripts limited to some projects (key: lowercase file name, like `script_models`): listed
+    /// only in those projects. No entry = every project.
+    pub script_projects: std::collections::HashMap<String, Vec<PathBuf>>,
     /// Script panel width and output height, once resized (None = default, output fits its text).
     pub script_panel_size: Option<[f32; 2]>,
     /// Search window: every session (else the current one), and how many days back (0 = all).
@@ -431,6 +434,7 @@ impl Default for Settings {
             active_on_top: true,
             script_auto_dismiss: true,
             script_models: Default::default(),
+            script_projects: Default::default(),
             script_panel_size: None,
             search_all: true,
             search_days: 0,
@@ -541,6 +545,19 @@ struct PluginsUi {
     new_source: String,
     /// A source whose Remove was clicked once (the second click confirms).
     confirm_remove: Option<String>,
+    /// Context token estimates by plugin id (None = no local copy to measure).
+    costs: std::collections::HashMap<String, Option<plugins::TokenCost>>,
+    /// Claude Code's own figures (`claude plugin details`), fetched for plugins once selected.
+    cli_costs: std::collections::HashMap<String, plugins::DetailsRef>,
+    /// How to run the claude CLI: (program, leading args).
+    cli: (String, Vec<String>),
+    /// On / off system wide and per project, by plugin id (read when first shown).
+    enablement: std::collections::HashMap<String, plugins::Enablement>,
+    /// The app's projects (for the per-project on / off) and the selected one.
+    projects: Vec<PathBuf>,
+    current_project: PathBuf,
+    /// An enable / disable to run in a given project folder (`--scope local` acts on the cwd).
+    toggle: Option<(Vec<String>, PathBuf)>,
 }
 
 /// BUNDLE badges in the plugins window (the app's blue, a shade deeper than buttons).

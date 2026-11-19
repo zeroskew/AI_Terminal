@@ -35,6 +35,8 @@ pub struct Plugin {
     pub source: String,
     pub source_ref: String,
     pub homepage: String,
+    /// The plugin's files in the local marketplace checkout (relative sources only).
+    pub dir: Option<PathBuf>,
     /// `name@marketplace` and the lowercased search text, filled in by `finish`.
     id: String,
     hay: String,
@@ -64,6 +66,10 @@ pub struct Installed {
     pub scope: String,
     pub version: String,
     pub enabled: bool,
+    /// Where Claude Code unpacked it (`installPath`).
+    pub path: Option<PathBuf>,
+    /// The project a project / local scope install belongs to.
+    pub project: Option<PathBuf>,
 }
 
 fn plugins_dir() -> Option<PathBuf> {
@@ -167,6 +173,7 @@ pub fn catalogue() -> Vec<Plugin> {
                 author: p["author"]["name"].as_str().map(str::to_string).unwrap_or_else(|| s(&p["author"])),
                 keywords: p["keywords"].as_array().map(|a| a.iter().filter_map(|k| k.as_str().map(str::to_string)).collect()).unwrap_or_default(),
                 category: s(&p["category"]),
+                dir: (source.starts_with("./") || source.starts_with("../")).then(|| loc.join(&source)),
                 source,
                 source_ref,
                 homepage: p["homepage"].as_str().or(p["repository"].as_str()).unwrap_or_default().to_string(),
@@ -188,14 +195,390 @@ pub fn installed() -> HashMap<String, Vec<Installed>> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return out };
     if let Some(o) = v["plugins"].as_object() {
         for (id, list) in o {
+            let user = user_settings().and_then(|p| enabled_in(&p, id));
             let entries = list
                 .as_array()
-                .map(|a| a.iter().map(|e| Installed { scope: s(&e["scope"]), version: s(&e["version"]), enabled: true }).collect())
+                .map(|a| {
+                    a.iter()
+                        .map(|e| {
+                            let scope = s(&e["scope"]);
+                            let project = e["projectPath"].as_str().map(PathBuf::from);
+                            // Its own scope's setting; installs write `true`, so missing counts as on.
+                            let enabled = match (scope.as_str(), &project) {
+                                ("project", Some(p)) => enabled_in(&p.join(".claude").join("settings.json"), id),
+                                ("local", Some(p)) => enabled_in(&p.join(".claude").join("settings.local.json"), id),
+                                _ => user,
+                            }
+                            .unwrap_or(true);
+                            Installed { scope, version: s(&e["version"]), enabled, path: e["installPath"].as_str().map(PathBuf::from), project }
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             out.insert(id.clone(), entries);
         }
     }
     out
+}
+
+/// `~/.claude/settings.json`.
+fn user_settings() -> Option<PathBuf> {
+    plugins_dir().and_then(|d| d.parent().map(|c| c.join("settings.json")))
+}
+
+/// A settings file's `enabledPlugins` entry for `id`, if it has one.
+fn enabled_in(settings: &Path, id: &str) -> Option<bool> {
+    let text = std::fs::read_to_string(settings).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text).ok()?["enabledPlugins"][id].as_bool()
+}
+
+/// Where a plugin's on / off in one project comes from (later layers win).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Layer {
+    /// Nothing set anywhere.
+    Default,
+    /// `~/.claude/settings.json`: every project.
+    User,
+    /// The project's `.claude/settings.json` (shared, usually committed).
+    Project,
+    /// The project's `.claude/settings.local.json` (personal).
+    Local,
+}
+
+/// A plugin's state in one project.
+#[derive(Clone, Debug)]
+pub struct ProjectState {
+    pub path: PathBuf,
+    pub on: bool,
+    pub from: Layer,
+    /// Installed in this project only (project / local scope), not system wide.
+    pub installed_here: bool,
+}
+
+/// A plugin's on / off system wide and in each project of `projects` it's available in
+/// (all of them for a user install; otherwise the projects it was installed into).
+#[derive(Clone, Debug)]
+pub struct Enablement {
+    /// Installed system wide (user scope), and its user-settings entry.
+    pub user_install: bool,
+    pub user: Option<bool>,
+    pub projects: Vec<ProjectState>,
+}
+
+pub fn enablement(id: &str, inst: &[Installed], projects: &[PathBuf]) -> Enablement {
+    let user_install = inst.iter().any(|i| i.scope == "user");
+    let user = user_settings().and_then(|p| enabled_in(&p, id));
+    let here: Vec<&PathBuf> = inst.iter().filter(|i| i.scope != "user").filter_map(|i| i.project.as_ref()).collect();
+    let same = |a: &Path, b: &Path| a.to_string_lossy().trim_end_matches(['\\', '/']).eq_ignore_ascii_case(b.to_string_lossy().trim_end_matches(['\\', '/']));
+    let mut paths: Vec<PathBuf> = projects.to_vec();
+    for p in &here {
+        if !paths.iter().any(|x| same(x, p)) {
+            paths.push((*p).clone());
+        }
+    }
+    let projects = paths
+        .into_iter()
+        .filter_map(|path| {
+            let installed_here = here.iter().any(|p| same(p, &path));
+            if !user_install && !installed_here {
+                return None;
+            }
+            let claude = path.join(".claude");
+            let (on, from) = match (enabled_in(&claude.join("settings.local.json"), id), enabled_in(&claude.join("settings.json"), id), user) {
+                (Some(v), ..) => (v, Layer::Local),
+                (None, Some(v), _) => (v, Layer::Project),
+                (None, None, Some(v)) => (v, Layer::User),
+                (None, None, None) => (true, Layer::Default),
+            };
+            Some(ProjectState { path, on, from, installed_here })
+        })
+        .collect();
+    Enablement { user_install, user, projects }
+}
+
+/// Removes a project's personal on / off for `id` (back to the project / system-wide
+/// setting). The CLI can only set it, not clear it.
+pub fn clear_local_override(project: &Path, id: &str) -> Result<(), String> {
+    let file = project.join(".claude").join("settings.local.json");
+    let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    let mut v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let Some(map) = v.get_mut("enabledPlugins").and_then(|m| m.as_object_mut()) else { return Ok(()) };
+    if map.shift_remove(id).is_none() {
+        return Ok(());
+    }
+    if map.is_empty() {
+        v.as_object_mut().map(|o| o.shift_remove("enabledPlugins"));
+    }
+    let mut out = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    out.push('\n');
+    std::fs::write(&file, out).map_err(|e| e.to_string())
+}
+
+/// What a Claude Code plugin adds to the context, estimated from its files (~3 characters a
+/// token; fast enough for every list row, unlike `claude plugin details`). Skills, commands and agents are listed by name and description in every request;
+/// their full text loads only when used. MCP tool definitions are only known once the server
+/// runs, so those servers are counted but not sized.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TokenCost {
+    /// Tokens sent with every request (the listings).
+    pub always: u64,
+    /// Tokens of the full skill / command / agent text, loaded when one is used.
+    pub on_use: u64,
+    pub skills: usize,
+    pub commands: usize,
+    pub agents: usize,
+    pub mcp_servers: usize,
+    pub hooks: bool,
+}
+
+/// ~3 characters a token: within about 10% of `claude plugin details` on typical plugins
+/// (4 undercounted by a third).
+fn est_tokens(chars: usize) -> u64 {
+    chars.div_ceil(3) as u64
+}
+
+/// A markdown file's YAML front matter and body.
+fn split_front_matter(text: &str) -> (&str, &str) {
+    let t = text.trim_start_matches('\u{feff}');
+    let Some(rest) = t.strip_prefix("---") else { return ("", t) };
+    let rest = rest.trim_start_matches(['\r', '\n']);
+    match rest.find("\n---") {
+        Some(i) => (&rest[..i], rest[i + 4..].trim_start_matches(['-', '\r', '\n'])),
+        None => ("", t),
+    }
+}
+
+/// A front-matter key's value, including indented continuation lines (`|` / `>` blocks).
+fn fm_value(fm: &str, key: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in fm.lines() {
+        if !line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+            if inside {
+                break;
+            }
+            if let Some(v) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
+                inside = true;
+                let v = v.trim();
+                if !matches!(v, "|" | ">" | "|-" | ">-") {
+                    out.push_str(v.trim_matches(['"', '\'']));
+                }
+            }
+        } else if inside {
+            out.push(' ');
+            out.push_str(line.trim());
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Adds one skill / command / agent file: its listing (name + description) and full size.
+/// Returns false when the file can't be read.
+fn add_entry(cost: &mut TokenCost, path: &Path, fallback_name: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    cost.on_use += est_tokens(text.len());
+    let (fm, body) = split_front_matter(&text);
+    // Hidden from the model: not listed.
+    if fm_value(fm, "disable-model-invocation") == "true" {
+        return true;
+    }
+    let name = fm_value(fm, "name");
+    let mut desc = fm_value(fm, "description");
+    if desc.is_empty() {
+        // Without a description Claude Code shows the first line of the body.
+        desc = body.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
+    }
+    let name = if name.is_empty() { fallback_name } else { &name };
+    // "- name: description" plus a little list framing.
+    cost.always += est_tokens(name.len() + desc.len() + 8);
+    true
+}
+
+/// `.md` files under `dir`, recursively.
+fn md_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            md_files(&p, out);
+        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("md")) {
+            out.push(p);
+        }
+    }
+}
+
+/// The paths a manifest key names (a string or a list), relative to the plugin root.
+fn manifest_paths(root: &Path, v: &serde_json::Value) -> Vec<PathBuf> {
+    match v {
+        serde_json::Value::String(s) => vec![root.join(s)],
+        serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str()).map(|s| root.join(s)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Estimates a Claude Code plugin's context cost from its folder; `None` if it isn't there.
+pub fn token_cost(root: &Path) -> Option<TokenCost> {
+    if !root.is_dir() {
+        return None;
+    }
+    let read = |p: &Path| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let manifest = read(&root.join(".claude-plugin").join("plugin.json")).unwrap_or_default();
+    let mut cost = TokenCost::default();
+    let mut seen = std::collections::HashSet::new();
+    // Skills: <dir>/<skill>/SKILL.md (or a SKILL.md directly in a listed path).
+    for d in std::iter::once(root.join("skills")).chain(manifest_paths(root, &manifest["skills"])) {
+        let mut found = Vec::new();
+        if d.join("SKILL.md").is_file() {
+            found.push(d.join("SKILL.md"));
+        } else if let Ok(rd) = std::fs::read_dir(&d) {
+            found.extend(rd.flatten().map(|e| e.path().join("SKILL.md")).filter(|p| p.is_file()));
+        }
+        for f in found {
+            let name = f.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if seen.insert(f.clone()) && add_entry(&mut cost, &f, &name) {
+                cost.skills += 1;
+            }
+        }
+    }
+    // Commands and agents: .md files under their folders (or listed .md paths).
+    for key in ["commands", "agents"] {
+        let mut files = Vec::new();
+        for d in std::iter::once(root.join(key)).chain(manifest_paths(root, &manifest[key])) {
+            if d.is_file() {
+                files.push(d);
+            } else {
+                md_files(&d, &mut files);
+            }
+        }
+        for f in files {
+            let name = f.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if seen.insert(f.clone()) && add_entry(&mut cost, &f, &name) {
+                *if key == "commands" { &mut cost.commands } else { &mut cost.agents } += 1;
+            }
+        }
+    }
+    // MCP servers: inline in the manifest, a file it names, or .mcp.json at the root.
+    let servers = |v: serde_json::Value| v.get("mcpServers").unwrap_or(&v).as_object().map_or(0, |o| o.len());
+    cost.mcp_servers = match &manifest["mcpServers"] {
+        serde_json::Value::Object(o) => o.len(),
+        serde_json::Value::String(s) => read(&root.join(s)).map_or(0, servers),
+        _ => read(&root.join(".mcp.json")).map_or(0, servers),
+    };
+    cost.hooks = !manifest["hooks"].is_null() || root.join("hooks").join("hooks.json").is_file();
+    Some(cost)
+}
+
+/// Claude Code's own cost figures for a plugin (`claude plugin details`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CliCost {
+    /// "Always-on" tokens: added to every session.
+    pub always: u64,
+    /// Per component: (name, always-on, on-invoke).
+    pub components: Vec<(String, u64, u64)>,
+    /// The component inventory: (kind, count), e.g. ("LSP servers", 1).
+    pub inventory: Vec<(String, usize)>,
+}
+
+impl CliCost {
+    /// Tokens paid when every component is used once.
+    pub fn on_invoke(&self) -> u64 {
+        self.components.iter().map(|c| c.2).sum()
+    }
+}
+
+/// "~759", "~9.7k", "1.2M" → tokens.
+fn parse_tok(s: &str) -> Option<u64> {
+    let s = s.trim().trim_start_matches('~').trim_end_matches("tok").trim();
+    let (num, mul) = match s.as_bytes().last()? {
+        b'k' | b'K' => (&s[..s.len() - 1], 1e3),
+        b'm' | b'M' => (&s[..s.len() - 1], 1e6),
+        _ => (s, 1.0),
+    };
+    num.trim().parse::<f64>().ok().map(|n| (n * mul).round() as u64)
+}
+
+/// Reads `claude plugin details` text output (there's no JSON form).
+fn parse_details(text: &str) -> Result<CliCost, String> {
+    let mut cost = CliCost::default();
+    let mut found = false;
+    let mut part = "";
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            part = "";
+            continue;
+        }
+        if !line.starts_with(' ') {
+            part = match t {
+                "Component inventory" => "inventory",
+                _ if t.starts_with("Per-component") => "components",
+                _ => "",
+            };
+            continue;
+        }
+        if let Some(v) = t.strip_prefix("Always-on:") {
+            cost.always = parse_tok(v.split_whitespace().next().unwrap_or_default()).ok_or_else(|| format!("unexpected line: {t}"))?;
+            found = true;
+            continue;
+        }
+        match part {
+            "inventory" => {
+                // "Skills (2)  a, b"
+                if let (Some(open), Some(close)) = (t.find('('), t.find(')')) {
+                    if let Ok(n) = t[open + 1..close].parse() {
+                        cost.inventory.push((t[..open].trim().to_string(), n));
+                    }
+                }
+            }
+            "components" => {
+                let w: Vec<&str> = t.split_whitespace().collect();
+                if w.len() >= 3 {
+                    if let (Some(a), Some(b)) = (parse_tok(w[w.len() - 2]), parse_tok(w[w.len() - 1])) {
+                        cost.components.push((w[..w.len() - 2].join(" "), a, b));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if found {
+        Ok(cost)
+    } else {
+        Err(text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("no output").to_string())
+    }
+}
+
+pub type DetailsRef = Arc<Mutex<Option<Result<CliCost, String>>>>;
+
+/// Runs `claude plugin details` on a thread: by id for an installed plugin (in `cwd`, so
+/// project installs are found), otherwise loading the local copy with `--plugin-dir`.
+pub fn details_async(program: &str, base_args: &[String], id: &str, name: &str, dir: Option<&Path>, installed: bool, cwd: &Path, ctx: egui::Context) -> DetailsRef {
+    let slot: DetailsRef = Arc::default();
+    let mut args = base_args.to_vec();
+    match (installed, dir) {
+        (true, _) => args.extend(["plugin".into(), "details".into(), id.to_string()]),
+        (false, Some(d)) => args.extend(["--plugin-dir".into(), d.display().to_string(), "plugin".into(), "details".into(), name.to_string()]),
+        (false, None) => {
+            *slot.lock().unwrap() = Some(Err("no local copy".into()));
+            return slot;
+        }
+    }
+    let (out, program, cwd) = (slot.clone(), program.to_string(), cwd.to_path_buf());
+    std::thread::spawn(move || {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let r = std::process::Command::new(&program)
+            .args(&args)
+            .current_dir(&cwd)
+            .stdin(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|e| format!("couldn't run claude: {e}"))
+            .and_then(|o| parse_details(&format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))));
+        *out.lock().unwrap() = Some(r);
+        ctx.request_repaint();
+    });
+    slot
 }
 
 /// A background `claude plugin …` run, with its output.
@@ -392,7 +775,7 @@ fn parse_codex_list(json: &str, by_id: &HashMap<String, CodexMeta>, by_name: &Ha
         }
         let id = format!("{name}@{marketplace}");
         if p["installed"].as_bool() == Some(true) {
-            installed.entry(id.clone()).or_insert_with(|| vec![Installed { scope: String::new(), version: s(&p["version"]), enabled: p["enabled"].as_bool().unwrap_or(true) }]);
+            installed.entry(id.clone()).or_insert_with(|| vec![Installed { scope: String::new(), version: s(&p["version"]), enabled: p["enabled"].as_bool().unwrap_or(true), path: None, project: None }]);
         }
         if !seen.insert(id.clone()) {
             continue;
@@ -458,6 +841,64 @@ mod tests {
         let first_plugin = c.iter().position(|p| !p.is_bundle()).unwrap_or(c.len());
         assert!(c[first_plugin..].iter().all(|p| !p.is_bundle()));
         assert!(c.iter().all(|p| p.id() == format!("{}@{}", p.name, p.marketplace)));
+    }
+
+    #[test]
+    fn estimates_token_cost() {
+        let dir = std::env::temp_dir().join(format!("ait-plugin-cost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["skills/demo", "commands/sub", ".claude-plugin"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join(".claude-plugin/plugin.json"), r#"{"name":"x","mcpServers":{"a":{},"b":{}}}"#).unwrap();
+        std::fs::write(dir.join("skills/demo/SKILL.md"), format!("---\nname: demo\ndescription: >\n  Does the\n  demo thing.\nallowed-tools: Bash\n---\n\n# Body\n{}", "x".repeat(400))).unwrap();
+        std::fs::write(dir.join("commands/sub/go.md"), "First line describes it.\nMore.").unwrap();
+        std::fs::write(dir.join("commands/hidden.md"), "---\ndisable-model-invocation: true\ndescription: never listed\n---\nbody").unwrap();
+        let c = token_cost(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((c.skills, c.commands, c.agents, c.mcp_servers, c.hooks), (1, 2, 0, 2, false));
+        assert_eq!(c.always, est_tokens("demo".len() + "Does the demo thing.".len() + 8) + est_tokens("go".len() + "First line describes it.".len() + 8));
+        assert!(c.on_use > 100);
+        assert!(token_cost(Path::new("Z:/definitely/missing")).is_none());
+    }
+
+    #[test]
+    fn layers_project_enablement() {
+        let root = std::env::temp_dir().join(format!("ait-plugin-en-{}", std::process::id()));
+        let (a, b, c) = (root.join("a"), root.join("b"), root.join("c"));
+        for p in [&a, &b] {
+            std::fs::create_dir_all(p.join(".claude")).unwrap();
+        }
+        let id = "zz-test-plugin@nowhere";
+        std::fs::write(a.join(".claude/settings.json"), format!(r#"{{"enabledPlugins":{{"{id}":true}}}}"#)).unwrap();
+        std::fs::write(a.join(".claude/settings.local.json"), format!(r#"{{"model":"x","enabledPlugins":{{"{id}":false}}}}"#)).unwrap();
+        std::fs::write(b.join(".claude/settings.json"), format!(r#"{{"enabledPlugins":{{"{id}":false}}}}"#)).unwrap();
+        let user = [Installed { scope: "user".into(), version: String::new(), enabled: true, path: None, project: None }];
+        let e = enablement(id, &user, &[a.clone(), b.clone(), c.clone()]);
+        let got: Vec<(bool, Layer)> = e.projects.iter().map(|p| (p.on, p.from)).collect();
+        assert_eq!(got, vec![(false, Layer::Local), (false, Layer::Project), (true, Layer::Default)]);
+        // A local-scope install shows only where it was installed.
+        let local = [Installed { scope: "local".into(), version: String::new(), enabled: true, path: None, project: Some(b.clone()) }];
+        let e = enablement(id, &local, &[a.clone(), c.clone()]);
+        assert!(!e.user_install);
+        assert_eq!(e.projects.len(), 1);
+        assert!(e.projects[0].installed_here && e.projects[0].path == b);
+        // Reset drops the personal override and keeps the rest of the file.
+        clear_local_override(&a, id).unwrap();
+        assert_eq!(std::fs::read_to_string(a.join(".claude/settings.local.json")).unwrap().trim(), "{\n  \"model\": \"x\"\n}");
+        assert_eq!(enablement(id, &user, std::slice::from_ref(&a)).projects[0].from, Layer::Project);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parses_cli_details() {
+        let text = "modern-web-guidance 0.0.194\n  Keep up to date\n  Source: x@y\n\nComponent inventory\n  Skills (2)  chrome-extensions, modern-web-guidance\n  Agents (0)\n  LSP servers (1)\n\nProjected token cost\n  Always-on:   ~759 tok   added to every session\n\nPer-component (rounded)\n  component            always-on  on-invoke\n  chrome-extensions         ~360      ~9.7k\n  my skill                   ~40        ~85\n\n  On-invoke cost is paid each time a skill or agent fires.\n";
+        let c = parse_details(text).unwrap();
+        assert_eq!(c.always, 759);
+        assert_eq!(c.components, vec![("chrome-extensions".to_string(), 360, 9700), ("my skill".to_string(), 40, 85)]);
+        assert_eq!(c.inventory, vec![("Skills".to_string(), 2), ("Agents".to_string(), 0), ("LSP servers".to_string(), 1)]);
+        assert_eq!(c.on_invoke(), 9785);
+        assert_eq!(parse_details("Plugin \"x\" not found. Run ...\n").unwrap_err(), "Plugin \"x\" not found. Run ...");
     }
 
     #[test]
