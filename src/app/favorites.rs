@@ -1,5 +1,6 @@
 //! The sidebar's Favourites panel: starred snippets and scripts, one group each (snippets
-//! first), sorted by name within a group. Click a row to insert the snippet / run the script.
+//! first), in the order the user dragged them into (else by name) within a group. Click a row
+//! to insert the snippet / run the script; drag it to reorder.
 
 use super::*;
 
@@ -112,8 +113,24 @@ impl App {
             .chain(std::iter::once(pinned))
     }
 
+    /// The current project's Favourites order (see `Project::fav_order`).
+    fn fav_order(&self) -> &[String] {
+        let cur = self.current_project();
+        self.s.projects.iter().find(|p| p.path == cur).map_or(&[], |p| &p.fav_order)
+    }
+
     /// A snippet or script was renamed: its stars and pin (in every project) follow it.
     pub(super) fn rename_fav(&mut self, list: FavList, old: &str, new: &str) {
+        let (old_tag, new_tag) = (order_tag(list, old), order_tag(list, new));
+        for p in &mut self.s.projects {
+            for k in p.fav_order.iter_mut() {
+                if *k == old_tag {
+                    *k = new_tag.clone();
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            p.fav_order.retain(|k| seen.insert(k.clone()));
+        }
         for v in self.all_fav_lists(list) {
             for k in v.iter_mut() {
                 if k == old {
@@ -128,18 +145,57 @@ impl App {
 
     /// A snippet or script was deleted: its stars and pin go too.
     pub(super) fn forget_fav(&mut self, list: FavList, key: &str) {
+        let tag = order_tag(list, key);
+        for p in &mut self.s.projects {
+            p.fav_order.retain(|k| *k != tag);
+        }
         for v in self.all_fav_lists(list) {
             v.retain(|k| k != key);
         }
     }
 
-    /// The favourites in display order: snippets, then scripts, each sorted by name.
+    /// A favourite's list and key.
+    fn fav_key(&self, f: Fav) -> (FavList, String) {
+        match f {
+            Fav::Snippet(i) => (FavList::Snippets, self.s.snippets[i].name.clone()),
+            Fav::Script(i) => (FavList::Scripts, scripts::script_key(&self.scripts[i].path).unwrap_or_default()),
+        }
+    }
+
+    /// The favourites in display order: snippets, then scripts, each in the project's dragged
+    /// order (unordered ones last, by name).
     fn favorites(&mut self) -> Vec<Fav> {
-        let mut sn: Vec<usize> = (0..self.s.snippets.len()).filter(|&i| self.is_fav(FavList::Snippets, &self.s.snippets[i].name)).collect();
-        sn.sort_by_cached_key(|&i| self.s.snippets[i].name.to_lowercase());
-        let mut sc = self.fav_script_list();
-        sc.sort_by_cached_key(|&i| self.scripts[i].name.to_lowercase());
-        sn.into_iter().map(Fav::Snippet).chain(sc.into_iter().map(Fav::Script)).collect()
+        let sn = (0..self.s.snippets.len()).filter(|&i| self.is_fav(FavList::Snippets, &self.s.snippets[i].name)).map(Fav::Snippet);
+        let mut favs: Vec<Fav> = sn.collect();
+        favs.extend(self.fav_script_list().into_iter().map(Fav::Script));
+        let order = self.fav_order();
+        favs.sort_by_cached_key(|&f| {
+            let (list, key) = self.fav_key(f);
+            let tag = order_tag(list, &key);
+            let name = match f {
+                Fav::Snippet(i) => &self.s.snippets[i].name,
+                Fav::Script(i) => &self.scripts[i].name,
+            };
+            (matches!(f, Fav::Script(_)), order.iter().position(|k| *k == tag).unwrap_or(usize::MAX), name.to_lowercase())
+        });
+        favs
+    }
+
+    /// Moves `favs[from]` to just before `favs[to]` (`favs.len()` = the end) and saves the
+    /// result as the current project's order.
+    fn move_fav(&mut self, favs: &[Fav], from: usize, to: usize) {
+        let mut tags: Vec<String> = favs.iter().map(|&f| {
+            let (list, key) = self.fav_key(f);
+            order_tag(list, &key)
+        }).collect();
+        let t = tags.remove(from);
+        tags.insert(if to > from { to - 1 } else { to }, t);
+        let cur = self.current_project();
+        let Some(p) = self.s.projects.iter_mut().find(|p| p.path == cur) else { return };
+        // Keep the ranks of favourites not shown now (say, a script that's missing for a while).
+        let rest: Vec<String> = p.fav_order.iter().filter(|k| !tags.contains(k)).cloned().collect();
+        tags.extend(rest);
+        p.fav_order = tags;
     }
 
     /// The panel's height in a sidebar `avail` px tall: just its header when nothing is starred,
@@ -194,7 +250,7 @@ impl App {
         let tip = if favs.is_empty() {
             "Star a snippet or script (☆) in the Snippets / Scripts palette to list it here"
         } else {
-            "Click a snippet to insert it into the current session, or a script to run it in the current project. Drag the top edge to resize."
+            "Click a snippet to insert it into the current session, or a script to run it in the current project. Drag a row to reorder it, or the top edge to resize."
         };
         ui.interact(head, egui::Id::unique("favorites_head"), Sense::hover()).on_hover_text(tip);
         if favs.is_empty() {
@@ -208,12 +264,16 @@ impl App {
         let mut unstar: Option<(FavList, String)> = None;
         let mut pin: Option<(FavList, String)> = None;
         let mut edit = None;
+        // Drag to reorder: (index of the dragged row, released this frame); (from, to) on drop.
+        let mut dragging: Option<(usize, bool)> = None;
+        let mut moved: Option<(usize, usize)> = None;
         let body = egui::Rect::from_min_max(egui::pos2(rect.left(), head.bottom()), rect.max);
         let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
         egui::ScrollArea::vertical().id_salt("favorites_scroll").auto_shrink([false, false]).show(&mut body_ui, |ui| {
             ui.spacing_mut().item_spacing.y = 1.0;
             let mut prev_script = None;
-            for &f in &favs {
+            let mut rows: Vec<(egui::Rect, bool)> = Vec::with_capacity(favs.len());
+            for (idx, &f) in favs.iter().enumerate() {
                 let (name, mark, mut tip, script, list, key) = match f {
                     Fav::Snippet(i) => {
                         let sn = &self.s.snippets[i];
@@ -238,10 +298,17 @@ impl App {
                 }
                 prev_script = Some(script);
 
-                let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
-                let hot = resp.hovered();
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click_and_drag());
+                rows.push((r, script));
+                if resp.dragged() || resp.drag_stopped() {
+                    dragging = Some((idx, resp.drag_stopped()));
+                }
+                let lifted = resp.dragged();
+                let hot = resp.hovered() || lifted;
                 let p = ui.painter();
-                if hot {
+                if lifted {
+                    p.rect_stroke(r, 5.0, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+                } else if hot {
                     p.rect_filled(r, 5.0, CARD_HI);
                 }
                 let icon = egui::Rect::from_center_size(egui::pos2(r.left() + 12.0, r.center().y), Vec2::splat(11.0));
@@ -289,7 +356,37 @@ impl App {
                     }
                 });
             }
+
+            // While dragging: a line where the row would land, within its own group (snippets
+            // stay above scripts); dropping there saves the new order.
+            let Some((from, released)) = dragging else { return };
+            let Some(y) = ui.ctx().pointer_latest_pos().map(|p| p.y) else { return };
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            let group = rows[from].1;
+            let in_group: Vec<usize> = (0..rows.len()).filter(|&i| rows[i].1 == group).collect();
+            let (first, last) = (in_group[0], in_group[in_group.len() - 1]);
+            let to = in_group.iter().copied().find(|&i| y < rows[i].0.center().y).unwrap_or(last + 1);
+            if to != from && to != from + 1 {
+                let line_y = if to > last { rows[last].0.bottom() } else if to == first { rows[first].0.top() } else { (rows[to - 1].0.bottom() + rows[to].0.top()) / 2.0 };
+                ui.painter().hline(rows[from].0.x_range().shrink(4.0), line_y, Stroke::new(2.0, ACCENT_HI));
+                if released {
+                    moved = Some((from, to));
+                }
+            }
+            // Scroll when held near the top or bottom edge.
+            let clip = ui.clip_rect();
+            let edge = (ROW_H).min(clip.height() / 4.0);
+            if !released && y < clip.top() + edge {
+                ui.scroll_with_delta(Vec2::new(0.0, 6.0));
+                ui.ctx().request_repaint();
+            } else if !released && y > clip.bottom() - edge {
+                ui.scroll_with_delta(Vec2::new(0.0, -6.0));
+                ui.ctx().request_repaint();
+            }
         });
+        if let Some((from, to)) = moved {
+            self.move_fav(&favs, from, to);
+        }
 
         // A double-click is two clicks: the second one (soon after) doesn't run it again.
         if pick.is_some() {
@@ -321,6 +418,14 @@ impl App {
         if let Some(page) = edit {
             self.options = Some(page);
         }
+    }
+}
+
+/// A favourite's entry in `Project::fav_order`.
+fn order_tag(list: FavList, key: &str) -> String {
+    match list {
+        FavList::Snippets => format!("snippet:{key}"),
+        FavList::Scripts => format!("script:{key}"),
     }
 }
 

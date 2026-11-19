@@ -65,6 +65,10 @@ pub struct Project {
     /// Scripts (lowercase file names, like `script_models`) in this project's Favourites panel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fav_scripts: Vec<String>,
+    /// The Favourites panel's order (dragged by the user), as `snippet:<name>` / `script:<key>`.
+    /// Favourites missing from it go after the listed ones, sorted by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fav_order: Vec<String>,
 }
 
 impl Project {
@@ -781,7 +785,7 @@ impl App {
         crate::hooks::watch(cc.egui_ctx.clone());
         if s.projects.is_empty() {
             let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"));
-            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
+            s.projects.push(Project { name: project_name(&home), path: home, collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new(), fav_order: Vec::new() });
         }
         images::cleanup_async(s.paste_keep_days, s.paste_limit_bytes());
         let logo = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon_64.png")).ok().map(|icon| {
@@ -961,7 +965,7 @@ impl App {
             if w[0] == "--add-project" {
                 let dir = PathBuf::from(&w[1]);
                 if !app.s.projects.iter().any(|p| p.path == dir) {
-                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
+                    app.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new(), fav_order: Vec::new() });
                 }
                 app.s.selected_project = Some(dir);
             }
@@ -1581,7 +1585,7 @@ impl App {
     fn add_project(&mut self, ctx: &egui::Context) {
         if let Some(dir) = rfd::FileDialog::new().set_title("Add project folder").pick_folder() {
             if !self.s.projects.iter().any(|p| p.path == dir) {
-                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new() });
+                self.s.projects.push(Project { name: project_name(&dir), path: dir.clone(), collapsed: false, in_tabs: true, accent: None, image: None, background: None, fav_snippets: Vec::new(), fav_scripts: Vec::new(), fav_order: Vec::new() });
             }
             let _ = ctx;
             self.select_project(Some(dir));
