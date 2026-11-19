@@ -8,6 +8,8 @@ use crate::theme::*;
 pub enum Icon {
     Plus,
     Close,
+    /// A window's minimize bar.
+    Minimize,
     Folder,
     Image,
     Restart,
@@ -61,6 +63,10 @@ pub fn paint_icon(p: &egui::Painter, icon: Icon, c: Pos2, s: f32, col: Color32) 
             let k = h * 0.55;
             p.line_segment([Pos2::new(c.x - k, c.y - k), Pos2::new(c.x + k, c.y + k)], st);
             p.line_segment([Pos2::new(c.x - k, c.y + k), Pos2::new(c.x + k, c.y - k)], st);
+        }
+        Icon::Minimize => {
+            let k = h * 0.55;
+            p.line_segment([Pos2::new(c.x - k, c.y + k * 0.6), Pos2::new(c.x + k, c.y + k * 0.6)], st);
         }
         Icon::Folder => {
             let body = Rect::from_min_max(Pos2::new(c.x - h * 0.85, c.y - h * 0.45), Pos2::new(c.x + h * 0.85, c.y + h * 0.7));

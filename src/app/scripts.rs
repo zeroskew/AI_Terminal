@@ -186,6 +186,67 @@ impl App {
                 Some(0) => ("done".to_string(), GREEN),
                 Some(c) => (format!("failed ({c})"), RED),
             };
+            if r.minimized {
+                // Minimized: a pill with the status and a progress bar; a click restores the panel.
+                let pct = if r.exit.is_none() { last_percent(&text) } else { None };
+                let resp = egui::Area::new(egui::Id::unique(("script_pill", r.id))).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-12.0, -y)).order(egui::Order::Foreground).show(ctx, |ui| {
+                    ui.multiply_opacity(opacity);
+                    let hover = ui.response().contains_pointer();
+                    let shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) };
+                    let stroke = Stroke::new(1.5, col.gamma_multiply(if hover { 0.9 } else { 0.6 }));
+                    let frame = egui::Frame::new().fill(if hover { CARD_HI } else { PANEL }).corner_radius(18).stroke(stroke).shadow(shadow).inner_margin(egui::Margin { left: 12, right: 14, top: 7, bottom: 7 }).show(ui, |ui| {
+                        ui.set_min_width(180.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            ui.painter().circle_filled(dot.center(), 4.0, col);
+                            ui.scope(|ui| {
+                                ui.set_max_width(170.0);
+                                ui.add(egui::Label::new(RichText::new(&r.name).family(bold()).color(TEXT)).truncate().selectable(false));
+                            });
+                            let st = match (pct, r.exit) {
+                                (Some(p), None) => format!("{p:.0}%"),
+                                _ => status.clone(),
+                            };
+                            ui.add(egui::Label::new(RichText::new(st).size(12.0).color(col)).selectable(false));
+                        });
+                        ui.add_space(3.0);
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
+                        let p = ui.painter();
+                        p.rect_filled(rect, 1.5, BORDER);
+                        match (r.exit, pct) {
+                            // Running with a percentage in its last output line: that much.
+                            (None, Some(v)) => {
+                                let mut f = rect;
+                                f.set_width(rect.width() * v / 100.0);
+                                p.rect_filled(f, 1.5, col);
+                            }
+                            // Running: a segment sliding across.
+                            (None, None) => {
+                                let t = (ui.input(|i| i.time) as f32 * 0.6).fract();
+                                let seg = rect.width() * 0.3;
+                                let x0 = rect.left() - seg + (rect.width() + seg) * t;
+                                let f = egui::Rect::from_min_max(egui::pos2(x0.max(rect.left()), rect.top()), egui::pos2((x0 + seg).min(rect.right()), rect.bottom()));
+                                p.rect_filled(f, 1.5, col);
+                                ctx.request_repaint();
+                            }
+                            // Finished: full, or the auto-dismiss countdown.
+                            (Some(_), _) => {
+                                let mut f = rect;
+                                f.set_width(rect.width() * left.unwrap_or(1.0).clamp(0.0, 1.0));
+                                p.rect_filled(f, 1.5, col);
+                            }
+                        }
+                    });
+                    frame.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show the panel")
+                });
+                if resp.inner.clicked() {
+                    r.minimized = false;
+                    r.dismiss_from = None;
+                }
+                y += resp.response.rect.height() + 8.0;
+                continue;
+            }
             let area = egui::Area::new(egui::Id::unique(("script_run", r.id))).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-12.0, -y)).order(egui::Order::Foreground);
             let resp = area.show(ctx, |ui| {
                 ui.multiply_opacity(opacity);
@@ -214,6 +275,9 @@ impl App {
                             let tip = if r.exit.is_none() { "Stop it and close" } else { "Close" };
                             if widgets::icon_button(ui, Icon::Close, 22.0, TEXT_DIM, tip).clicked() {
                                 close.push(r.id);
+                            }
+                            if widgets::icon_button(ui, Icon::Minimize, 22.0, TEXT_DIM, "Minimize to a pill").clicked() {
+                                r.minimized = true;
                             }
                             if r.exit.is_none() {
                                 if ui.button("Stop").clicked() {
@@ -488,6 +552,8 @@ pub(super) struct ScriptRun {
     /// The answer box has had the keyboard once (it takes it when it first appears).
     input_focused: bool,
     collapsed: bool,
+    /// Shown as a small pill (status and progress bar) instead of the panel.
+    minimized: bool,
     /// When the auto-dismiss countdown started (it finished successfully; a click in the panel cancels it).
     dismiss_from: Option<Instant>,
 }
@@ -556,6 +622,7 @@ impl ScriptRun {
             input: String::new(),
             input_focused: false,
             collapsed: false,
+            minimized: false,
             dismiss_from: None,
         })
     }
@@ -613,6 +680,14 @@ impl Drop for ScriptRun {
 }
 
 /// Strips ANSI escape sequences and carriage returns.
+/// The last percentage (0-100) in the output's last non-empty line, e.g. "Downloading 42%".
+fn last_percent(text: &str) -> Option<f32> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"(\d{1,3}(?:\.\d+)?)\s?%").unwrap());
+    let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    re.captures_iter(line).filter_map(|c| c[1].parse::<f32>().ok()).filter(|v| (0.0..=100.0).contains(v)).last()
+}
+
 fn clean_output(s: &str) -> String {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])").unwrap());

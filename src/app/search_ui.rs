@@ -172,8 +172,12 @@ impl App {
         let screen = ctx.content_rect();
         let size = Vec2::new((screen.width() * 0.8).clamp(480.0, 1500.0), (screen.height() * 0.82).clamp(260.0, 1100.0));
         let frame = egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(16);
+        // Foreground and kept on top so the terminal's find bar (a Foreground area) can't draw over it.
+        let win_id = egui::Id::unique("search_window_v2");
+        ctx.move_to_top(egui::LayerId::new(egui::Order::Foreground, win_id));
         egui::Window::new("Search")
-            .id(egui::Id::unique("search_window_v2"))
+            .id(win_id)
+            .order(egui::Order::Foreground)
             .open(&mut open)
             .title_bar(false)
             .frame(frame)
