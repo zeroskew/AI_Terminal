@@ -519,21 +519,26 @@ impl App {
                     p.text(egui::pos2(x, rect.center().y), egui::Align2::RIGHT_CENTER, n.to_string(), egui::FontId::proportional(11.5), TEXT_DIM);
                     widgets::paint_icon(p, Icon::Image, egui::pos2(x - 15.0, rect.center().y), 12.0, TEXT_DIM);
                 }
-                if resp.clicked() && !x_clicked {
+                // Single-click mode: a click opens, a double click renames. Double-click mode: a
+                // double click opens (rename is in the right-click menu).
+                let dbl = self.s.sessions_double_click;
+                let open = if dbl { resp.double_clicked() } else { resp.clicked() };
+                if open && !x_clicked {
                     if row.live {
                         select_req = Some(id);
                     } else {
                         resume_req = Some(id);
                     }
                 }
-                if resp.double_clicked() {
+                if !dbl && resp.double_clicked() {
                     self.renaming = Some((id, name.clone()));
                     self.rename_focus = true;
                 }
+                let click = if dbl { "double-click" } else { "click" };
                 let state = if row.archived {
-                    "\nArchived — click to resume".to_string()
+                    format!("\nArchived — {click} to resume")
                 } else if row.later {
-                    "\nSaved for later — click to resume".to_string()
+                    format!("\nSaved for later — {click} to resume")
                 } else if !row.live {
                     String::new()
                 } else {

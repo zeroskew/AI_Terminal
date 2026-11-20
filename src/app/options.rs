@@ -671,6 +671,17 @@ impl App {
             ui.label("sessions per project in the list");
         });
         ui.label(RichText::new("Older ones move to the Archived group at the bottom of the list (still resumable; right-click > Restore to list brings one back). Running, pinned and Saved for later sessions are never archived. 0 = keep all.").size(12.0).color(TEXT_FAINT));
+        ui.horizontal(|ui| {
+            ui.label("Open a session in the list with a");
+            ui.radio_value(&mut self.s.sessions_double_click, false, "Single click");
+            ui.radio_value(&mut self.s.sessions_double_click, true, "Double click");
+        });
+        ui.label(RichText::new("With single click, a double click renames the session; either way, right-click > Rename works too.").size(12.0).color(TEXT_FAINT));
+        ui.horizontal(|ui| {
+            ui.label("Run a Favourites snippet or script with a");
+            ui.radio_value(&mut self.s.favorites_double_click, false, "Single click");
+            ui.radio_value(&mut self.s.favorites_double_click, true, "Double click");
+        });
         ui.checkbox(&mut self.s.active_on_top, "Move running sessions to the top of the list");
         ui.label(RichText::new("They show in an Active group below Pinned; a session drops back to its day once it's closed or exits.").size(12.0).color(TEXT_FAINT));
         ui.checkbox(&mut self.s.name_sessions, "Ask agents to name new sessions after their first task");

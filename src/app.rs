@@ -344,6 +344,10 @@ pub struct Settings {
     pub keep_sessions: u32,
     /// Running sessions go to an Active group at the top of the list (below Pinned).
     pub active_on_top: bool,
+    /// Open a session in the list with a double click (else a single click; a double click renames).
+    pub sessions_double_click: bool,
+    /// Run a Favourites snippet or script with a double click (else a single click).
+    pub favorites_double_click: bool,
     /// Close a script's panel a few seconds after it finishes successfully.
     pub script_auto_dismiss: bool,
     /// The AI model per script (key: lowercase file name, e.g. "commit and push.ps1"), passed to it
@@ -436,6 +440,8 @@ impl Default for Settings {
             usage_as: "plan".into(),
             keep_sessions: 20,
             active_on_top: true,
+            sessions_double_click: false,
+            favorites_double_click: false,
             script_auto_dismiss: true,
             script_models: Default::default(),
             script_projects: Default::default(),

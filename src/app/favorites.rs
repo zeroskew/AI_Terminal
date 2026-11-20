@@ -273,18 +273,19 @@ impl App {
             ui.spacing_mut().item_spacing.y = 1.0;
             let mut prev_script = None;
             let mut rows: Vec<(egui::Rect, bool)> = Vec::with_capacity(favs.len());
+            let click = if self.s.favorites_double_click { "double-click" } else { "click" };
             for (idx, &f) in favs.iter().enumerate() {
                 let (name, mark, mut tip, script, list, key) = match f {
                     Fav::Snippet(i) => {
                         let sn = &self.s.snippets[i];
                         let text = sn.text.lines().take(6).collect::<Vec<_>>().join("\n");
-                        let how = if sn.send { "Snippet: click to insert and send" } else { "Snippet: click to insert" };
+                        let how = if sn.send { format!("Snippet: {click} to insert and send") } else { format!("Snippet: {click} to insert") };
                         (sn.name.clone(), if sn.send { "↵" } else { "" }, format!("{text}\n\n{how}"), false, FavList::Snippets, sn.name.clone())
                     }
                     Fav::Script(i) => {
                         let sc = &self.scripts[i];
                         let key = scripts::script_key(&sc.path).unwrap_or_default();
-                        (sc.name.clone(), "", format!("{}\n\nScript: click to run it in the background in {project}", sc.desc), true, FavList::Scripts, key)
+                        (sc.name.clone(), "", format!("{}\n\nScript: {click} to run it in the background in {project}", sc.desc), true, FavList::Scripts, key)
                     }
                 };
                 let pinned = self.is_pinned(list, &key);
@@ -335,7 +336,7 @@ impl App {
                 p.galley(egui::pos2(r.left() + 26.0, r.center().y - g.size().y / 2.0), g, TEXT_DIM);
 
                 let resp = resp.on_hover_text(tip);
-                if resp.clicked() {
+                if if self.s.favorites_double_click { resp.double_clicked() } else { resp.clicked() } {
                     pick = Some(f);
                 }
                 resp.context_menu(|ui| {
