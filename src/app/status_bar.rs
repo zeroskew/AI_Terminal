@@ -38,10 +38,10 @@ impl App {
         }
         sep(ui);
         if kind == Kind::Claude {
-            if link_button(ui, "MCP servers", "Choose which MCP servers are enabled for this project") {
+            if link_button(ui, "mcp", "Choose which MCP servers are enabled for this project") {
                 self.open_mcp_servers(project, &ui.ctx().clone());
             }
-        } else if link_button(ui, "MCP servers", "Run /mcp: the MCP servers this session has") {
+        } else if link_button(ui, "mcp", "Run /mcp: the MCP servers this session has") {
             send = Some("/mcp");
         }
         if let Some(cmd) = send {

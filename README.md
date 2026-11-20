@@ -154,7 +154,7 @@ so the agent can work with the app itself:
 | `messaging_pending` / `messaging_cancel` | List / cancel waiting messages |
 | `handoff_create_session` | Start a new session of the same kind with handoff notes as its first prompt |
 
-### Switching MCP servers per project (status bar → MCP servers)
+### Switching MCP servers per project (status bar → mcp)
 
 Every enabled MCP server sends its tool list with each request, so unused ones cost tokens
 (`/context` in a session shows how many). The dialog lists, with a description of each:
