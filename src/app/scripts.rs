@@ -205,6 +205,8 @@ impl App {
                 let resp = egui::Area::new(egui::Id::unique(("script_pill", r.id))).anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-12.0, -y)).order(egui::Order::Foreground).show(ctx, |ui| {
                     ui.multiply_opacity(opacity);
                     let hover = ui.response().contains_pointer();
+                    // Finished: an [x] at the right end closes it without opening the panel.
+                    let mut close_slot = None;
                     let shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) };
                     let stroke = Stroke::new(1.5, col.gamma_multiply(if hover { 0.9 } else { 0.6 }));
                     let frame = egui::Frame::new().fill(if hover { CARD_HI } else { PANEL }).corner_radius(18).stroke(stroke).shadow(shadow).inner_margin(egui::Margin { left: 12, right: 14, top: 7, bottom: 7 }).show(ui, |ui| {
@@ -215,7 +217,8 @@ impl App {
                             let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                             ui.painter().circle_filled(dot.center(), 4.0, col);
                             ui.scope(|ui| {
-                                ui.set_max_width((ui.available_width() - 125.0).max(40.0));
+                                let reserve = if r.exit.is_some() { 125.0 + PILL_CLOSE + 6.0 } else { 125.0 };
+                                ui.set_max_width((ui.available_width() - reserve).max(40.0));
                                 ui.add(egui::Label::new(RichText::new(&r.name).family(bold()).color(TEXT)).truncate().selectable(false));
                             });
                             let st = match (pct, r.exit) {
@@ -224,6 +227,9 @@ impl App {
                             };
                             ui.add(egui::Label::new(RichText::new(st).size(12.0).color(col)).selectable(false));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if r.exit.is_some() {
+                                    close_slot = Some(ui.allocate_exact_size(Vec2::splat(PILL_CLOSE), Sense::hover()).0);
+                                }
                                 ui.add(egui::Label::new(RichText::new(r.timer()).size(12.0).monospace().color(TEXT_DIM)).selectable(false));
                             });
                         });
@@ -255,9 +261,23 @@ impl App {
                             }
                         }
                     });
-                    frame.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show the panel")
+                    let open = frame.response.interact(Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Show the panel");
+                    // Registered after the pill's own click so it is the one hit over the [x].
+                    let closed = close_slot.is_some_and(|rect| {
+                        let x = ui.interact(rect, egui::Id::unique(("script_pill_close", r.id)), Sense::click());
+                        let p = ui.painter();
+                        if x.hovered() {
+                            p.rect_filled(rect, 5.0, if x.is_pointer_button_down_on() { Color32::from_rgb(62, 66, 76) } else { BORDER });
+                        }
+                        widgets::paint_icon(p, Icon::Close, rect.center(), PILL_CLOSE * 0.55, if x.hovered() { TEXT } else { TEXT_DIM });
+                        x.on_hover_text("Close").clicked()
+                    });
+                    (open.clicked(), closed)
                 });
-                if resp.inner.clicked() {
+                let (open, closed) = resp.inner;
+                if closed {
+                    close.push(r.id);
+                } else if open {
                     r.minimized = false;
                     r.dismiss_from = None;
                 }
@@ -588,6 +608,8 @@ pub(super) struct ScriptRun {
 
 /// Width of a minimized panel's pill (inside its margins).
 const PILL_W: f32 = 300.0;
+/// Size of the [x] on a finished script's pill.
+const PILL_CLOSE: f32 = 18.0;
 /// How long the auto-dismissed panel takes to fade out.
 const FADE_OUT: Duration = Duration::from_millis(150);
 
