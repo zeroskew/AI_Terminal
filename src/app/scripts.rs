@@ -213,7 +213,7 @@ impl App {
                             let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                             ui.painter().circle_filled(dot.center(), 4.0, col);
                             ui.scope(|ui| {
-                                ui.set_max_width(170.0);
+                                ui.set_max_width(420.0);
                                 ui.add(egui::Label::new(RichText::new(&r.name).family(bold()).color(TEXT)).truncate().selectable(false));
                             });
                             let st = match (pct, r.exit) {
