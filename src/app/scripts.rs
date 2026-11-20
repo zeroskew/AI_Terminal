@@ -221,6 +221,9 @@ impl App {
                                 _ => status.clone(),
                             };
                             ui.add(egui::Label::new(RichText::new(st).size(12.0).color(col)).selectable(false));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add(egui::Label::new(RichText::new(r.timer()).size(12.0).monospace().color(TEXT_DIM)).selectable(false));
+                            });
                         });
                         ui.add_space(3.0);
                         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), Sense::hover());
@@ -301,6 +304,7 @@ impl App {
                             if ui.button(if r.collapsed { "Show output" } else { "Hide output" }).clicked() {
                                 r.collapsed = !r.collapsed;
                             }
+                            ui.label(RichText::new(r.timer()).size(12.0).monospace().color(TEXT_DIM));
                         });
                     });
                     // The header glow: the status color fading out downwards from the top edge.
@@ -575,6 +579,9 @@ pub(super) struct ScriptRun {
     asked_at: usize,
     /// When the auto-dismiss countdown started (it finished successfully; a click in the panel cancels it).
     dismiss_from: Option<Instant>,
+    /// When it started, and how long it ran once it ended (for the timer).
+    started: Instant,
+    took: Option<Duration>,
 }
 
 /// How long a finished panel stays before it closes itself.
@@ -645,6 +652,8 @@ impl ScriptRun {
             out_at: Instant::now(),
             asked_at: 0,
             dismiss_from: None,
+            started: Instant::now(),
+            took: None,
         })
     }
 
@@ -655,8 +664,15 @@ impl ScriptRun {
         }
         let code = self.child.try_wait().ok().flatten()?.code().unwrap_or(-1);
         self.exit = Some(code);
+        self.took = Some(self.started.elapsed());
         self.stdin = None;
         Some(code)
+    }
+
+    /// Time it has been running (or ran): m:ss, or h:mm:ss past an hour.
+    fn timer(&self) -> String {
+        let s = self.took.unwrap_or_else(|| self.started.elapsed()).as_secs();
+        if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
     }
 
     /// The output so far: UTF-8, without color codes, CRLF as LF.
