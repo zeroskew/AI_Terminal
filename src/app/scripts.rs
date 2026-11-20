@@ -207,13 +207,14 @@ impl App {
                     let shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(140) };
                     let stroke = Stroke::new(1.5, col.gamma_multiply(if hover { 0.9 } else { 0.6 }));
                     let frame = egui::Frame::new().fill(if hover { CARD_HI } else { PANEL }).corner_radius(18).stroke(stroke).shadow(shadow).inner_margin(egui::Margin { left: 12, right: 14, top: 7, bottom: 7 }).show(ui, |ui| {
-                        ui.set_min_width(180.0);
+                        // A fixed compact width: the name truncates to leave room for the status and timer.
+                        ui.set_width(PILL_W);
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 6.0;
                             let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                             ui.painter().circle_filled(dot.center(), 4.0, col);
                             ui.scope(|ui| {
-                                ui.set_max_width(420.0);
+                                ui.set_max_width((ui.available_width() - 125.0).max(40.0));
                                 ui.add(egui::Label::new(RichText::new(&r.name).family(bold()).color(TEXT)).truncate().selectable(false));
                             });
                             let st = match (pct, r.exit) {
@@ -584,6 +585,8 @@ pub(super) struct ScriptRun {
     took: Option<Duration>,
 }
 
+/// Width of a minimized panel's pill (inside its margins).
+const PILL_W: f32 = 300.0;
 /// How long a finished panel stays before it closes itself.
 const DISMISS_AFTER: Duration = Duration::from_secs(10);
 /// How long the auto-dismissed panel takes to fade out.
