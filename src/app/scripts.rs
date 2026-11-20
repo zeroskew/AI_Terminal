@@ -106,7 +106,10 @@ impl App {
         let (program, args) = script_command(sc, self.pwsh());
         let env = self.script_model(&sc.path).map(|m| vec![("AI_TERMINAL_CLI".to_string(), m.cli), ("AI_TERMINAL_MODEL".to_string(), m.model), ("AI_TERMINAL_EFFORT".to_string(), m.effort)]).unwrap_or_default();
         match ScriptRun::start(ctx, sc.name.clone(), program, args, project, None, env) {
-            Ok(r) => self.script_runs.push(r),
+            Ok(mut r) => {
+                r.minimized = self.s.script_start_minimized;
+                self.script_runs.push(r);
+            }
             Err(e) => self.toast(format!("Couldn't run {}: {e}", sc.name), RED, ctx),
         }
     }
@@ -131,7 +134,10 @@ impl App {
     /// install / uninstall of that agent CLI (the agent list is re-detected when it ends).
     pub(super) fn run_in_background(&mut self, ctx: &egui::Context, name: String, program: String, args: Vec<String>, cwd: PathBuf, agent: Option<Kind>) {
         match ScriptRun::start(ctx, name.clone(), program, args, cwd, agent, Vec::new()) {
-            Ok(r) => self.script_runs.push(r),
+            Ok(mut r) => {
+                r.minimized = self.s.script_start_minimized;
+                self.script_runs.push(r);
+            }
             Err(e) => self.toast(format!("Couldn't run {name}: {e}"), RED, ctx),
         }
     }
@@ -186,6 +192,12 @@ impl App {
                 Some(0) => ("done".to_string(), GREEN),
                 Some(c) => (format!("failed ({c})"), RED),
             };
+            // Minimized and it seems to be asking something (the output ends with a question and
+            // has gone quiet): show the panel so the answer box can be seen. Once per question.
+            if r.minimized && r.exit.is_none() && r.stdin.is_some() && r.text.0 != r.asked_at && r.out_at.elapsed() >= ASK_IDLE && asks_question(&text) {
+                r.minimized = false;
+                r.asked_at = r.text.0;
+            }
             if r.minimized {
                 // Minimized: a pill with the status and a progress bar; a click restores the panel.
                 let pct = if r.exit.is_none() { last_percent(&text) } else { None };
@@ -391,7 +403,10 @@ impl App {
         if let Some(i) = again.and_then(|id| self.script_runs.iter().position(|r| r.id == id)) {
             let r = &self.script_runs[i];
             match ScriptRun::start(ctx, r.name.clone(), r.program.clone(), r.args.clone(), r.cwd.clone(), r.agent, r.env.clone()) {
-                Ok(n) => self.script_runs[i] = n,
+                Ok(mut n) => {
+                    n.minimized = r.minimized;
+                    self.script_runs[i] = n;
+                }
                 Err(e) => {
                     let msg = format!("Couldn't run {}: {e}", r.name);
                     self.toast(msg, RED, ctx);
@@ -554,6 +569,10 @@ pub(super) struct ScriptRun {
     collapsed: bool,
     /// Shown as a small pill (status and progress bar) instead of the panel.
     minimized: bool,
+    /// When the output last changed (see `text`).
+    out_at: Instant,
+    /// The output length when the panel was last opened for a question (so it opens once per question).
+    asked_at: usize,
     /// When the auto-dismiss countdown started (it finished successfully; a click in the panel cancels it).
     dismiss_from: Option<Instant>,
 }
@@ -623,6 +642,8 @@ impl ScriptRun {
             input_focused: false,
             collapsed: false,
             minimized: false,
+            out_at: Instant::now(),
+            asked_at: 0,
             dismiss_from: None,
         })
     }
@@ -643,6 +664,7 @@ impl ScriptRun {
         let o = self.out.lock().unwrap();
         if self.text.0 != o.len() {
             self.text = (o.len(), clean_output(&String::from_utf8_lossy(&o)));
+            self.out_at = Instant::now();
         }
         self.text.1.clone()
     }
@@ -679,7 +701,17 @@ impl Drop for ScriptRun {
     }
 }
 
-/// Strips ANSI escape sequences and carriage returns.
+/// How long the output must stay quiet, ending in a question, before a minimized panel opens.
+const ASK_IDLE: Duration = Duration::from_millis(500);
+
+/// Whether the output's last non-empty line looks like a prompt ("Name?", "Continue (y/n):").
+fn asks_question(text: &str) -> bool {
+    text.lines().rev().find(|l| !l.trim().is_empty()).is_some_and(|l| {
+        let l = l.trim_end();
+        !l.starts_with("> ") && (l.ends_with('?') || l.ends_with(':'))
+    })
+}
+
 /// The last percentage (0-100) in the output's last non-empty line, e.g. "Downloading 42%".
 fn last_percent(text: &str) -> Option<f32> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -688,6 +720,7 @@ fn last_percent(text: &str) -> Option<f32> {
     re.captures_iter(line).filter_map(|c| c[1].parse::<f32>().ok()).filter(|v| (0.0..=100.0).contains(v)).last()
 }
 
+/// Strips ANSI escape sequences and carriage returns.
 fn clean_output(s: &str) -> String {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| regex::Regex::new(r"\x1b(\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])").unwrap());
@@ -984,6 +1017,7 @@ impl App {
                 self.sync_script_drafts();
             }
         });
+        ui.checkbox(&mut self.s.script_start_minimized, "Start scripts minimized to a pill (the panel opens when a script asks a question)");
         ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (click it to keep it open)", DISMISS_AFTER.as_secs()));
         ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
         ui.label(RichText::new("Projects limits a script to some projects: it's only listed in their Scripts palette and Favourites.").size(12.0).color(TEXT_FAINT));
@@ -1193,6 +1227,19 @@ exit 0
         assert!(r.text().contains("hi Bob"), "{}", r.text());
         drop(r);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detects_questions() {
+        assert!(super::asks_question("Working
+Name?
+"));
+        assert!(super::asks_question("Continue (y/n): "));
+        assert!(!super::asks_question("Name?
+> Bob
+"));
+        assert!(!super::asks_question("Downloading 40%"));
+        assert!(!super::asks_question(""));
     }
 
     #[test]

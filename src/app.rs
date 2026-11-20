@@ -350,6 +350,8 @@ pub struct Settings {
     pub favorites_double_click: bool,
     /// Close a script's panel a few seconds after it finishes successfully.
     pub script_auto_dismiss: bool,
+    /// Start a script's panel minimized to a pill (it opens when the script asks a question).
+    pub script_start_minimized: bool,
     /// The AI model per script (key: lowercase file name, e.g. "commit and push.ps1"), passed to it
     /// as AI_TERMINAL_CLI / AI_TERMINAL_MODEL / AI_TERMINAL_EFFORT. No entry = the script's own default.
     pub script_models: std::collections::HashMap<String, ScriptModel>,
@@ -443,6 +445,7 @@ impl Default for Settings {
             sessions_double_click: false,
             favorites_double_click: false,
             script_auto_dismiss: true,
+            script_start_minimized: true,
             script_models: Default::default(),
             script_projects: Default::default(),
             script_panel_size: None,
