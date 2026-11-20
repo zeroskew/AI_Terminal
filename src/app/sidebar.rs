@@ -567,6 +567,9 @@ impl App {
                 if let Some(c) = row.cost.filter(|c| *c > 0.0) {
                     info += &format!("\nCost {}", crate::cost::fmt_usd(c));
                 }
+                if row.images > 0 {
+                    info += &format!("\n{} image{}", row.images, if row.images == 1 { "" } else { "s" });
+                }
                 let detail = format!("{}{info}{state}{now}", head.join(" · "));
                 let (live, resumable, unrestricted, agent) = (row.live, row.resumable, row.unrestricted, row.profile.is_agent());
                 let pinned = row.pin > 0;
