@@ -156,6 +156,7 @@ impl App {
         let mut redetect = false;
         let mut y = 34.0;
         let auto_dismiss = self.s.script_auto_dismiss;
+        let dismiss_after = self.s.script_dismiss_secs.clamp(1, 10) as f32;
         // Panel size: all panels share it; dragging any panel's top / left edge changes it.
         let mut size = self.s.script_panel_size;
         let screen = ctx.content_rect();
@@ -175,8 +176,8 @@ impl App {
             }
             // Share of the countdown left (1 = just started), then a quick fade-out once it runs out.
             let elapsed = r.dismiss_from.map(|t| t.elapsed().as_secs_f32());
-            let left = elapsed.map(|e| (1.0 - e / DISMISS_AFTER.as_secs_f32()).max(0.0));
-            let opacity = elapsed.map_or(1.0, |e| 1.0 - (e - DISMISS_AFTER.as_secs_f32()).max(0.0) / FADE_OUT.as_secs_f32());
+            let left = elapsed.map(|e| (1.0 - e / dismiss_after).max(0.0));
+            let opacity = elapsed.map_or(1.0, |e| 1.0 - (e - dismiss_after).max(0.0) / FADE_OUT.as_secs_f32());
             if opacity <= 0.0 {
                 close.push(r.id);
                 continue;
@@ -587,8 +588,6 @@ pub(super) struct ScriptRun {
 
 /// Width of a minimized panel's pill (inside its margins).
 const PILL_W: f32 = 300.0;
-/// How long a finished panel stays before it closes itself.
-const DISMISS_AFTER: Duration = Duration::from_secs(10);
 /// How long the auto-dismissed panel takes to fade out.
 const FADE_OUT: Duration = Duration::from_millis(150);
 
@@ -1037,7 +1036,12 @@ impl App {
             }
         });
         ui.checkbox(&mut self.s.script_start_minimized, "Start scripts minimized to a pill (the panel opens when a script asks a question)");
-        ui.checkbox(&mut self.s.script_auto_dismiss, format!("Close the output panel {} s after a script finishes successfully (click it to keep it open)", DISMISS_AFTER.as_secs()));
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.s.script_auto_dismiss, "Close the output panel");
+            let unit = if self.s.script_dismiss_secs == 1 { " second" } else { " seconds" };
+            ui.add_enabled(self.s.script_auto_dismiss, egui::DragValue::new(&mut self.s.script_dismiss_secs).range(1..=10).speed(0.1).suffix(unit));
+            ui.label("after a script finishes successfully (click it to keep it open)");
+        });
         ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
         ui.label(RichText::new("Projects limits a script to some projects: it's only listed in their Scripts palette and Favourites.").size(12.0).color(TEXT_FAINT));
         ui.label(RichText::new("Scripts that read $env:AI_TERMINAL_MODEL (and AI_TERMINAL_CLI) get a model picker: the Claude, Codex or Antigravity model you pick there is passed to them.").size(12.0).color(TEXT_FAINT));
