@@ -25,7 +25,8 @@ installs it over the exe you started (Options > General > Updates).
 ## Features
 
 - **Layout**: project tabs across the top (Home + a tab per project ticked **Show in tabs**;
-  a dot shows sessions, orange when one has new output), a "+" after the tabs adds a project.
+  a dot shows sessions, orange when one finished with new output you haven't seen, with a
+  spinning ring while a task is running), a "+" after the tabs adds a project.
   With many tabs, long names are cut with "…" first; tabs that still don't fit go into a "»"
   menu (with a filter box once it gets long). The selected tab always stays in the bar, the "»"
   shows a dot when a project in it has new activity, picking one moves it into the bar, and

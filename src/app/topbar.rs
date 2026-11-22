@@ -43,11 +43,12 @@ impl App {
                 .map(|proj| {
                     let sel = self.s.selected_project.as_ref() == Some(&proj.path);
                     let dot = self.project_dot(&proj.path);
+                    let busy = self.project_busy(&proj.path);
                     let image = self.project_image(&proj.path);
                     let font = egui::FontId::new(13.5, if sel { bold() } else { egui::FontFamily::Proportional });
                     let name_w = ui.painter().layout_no_wrap(proj.name.clone(), font, TEXT).size().x;
                     let extra = if dot.is_some() { 14.0 } else { 0.0 } + if image.is_some() { 24.0 } else { 0.0 } + 32.0 + TAB_CLOSE_W;
-                    TabInfo { proj, sel, dot, image, name_w, extra }
+                    TabInfo { proj, sel, dot, busy, image, name_w, extra }
                 })
                 .collect();
             let room = x_end - x;
@@ -99,7 +100,13 @@ impl App {
                 }
                 let mut tx = tr.left() + 16.0;
                 if let Some(c) = dot {
-                    p.circle_filled(egui::pos2(tx + 3.0, tr.center().y), 3.5, c);
+                    let dc = egui::pos2(tx + 3.0, tr.center().y);
+                    p.circle_filled(dc, 3.5, c);
+                    if t.busy > 0 {
+                        // A task is running: a ring spins around the dot.
+                        widgets::paint_busy_ring(p, dc, 7.0, ui.input(|i| i.time) as f32);
+                        ui.ctx().request_repaint_after(Duration::from_millis(33));
+                    }
                     tx += 14.0;
                 }
                 if let Some(img) = &t.image {
@@ -205,7 +212,12 @@ impl App {
                                 p.rect_filled(egui::Rect::from_min_size(egui::pos2(rr.left() + 2.0, rr.top() + 6.0), Vec2::new(3.0, rr.height() - 12.0)), 1.5, a);
                             }
                             if let Some(c) = t.dot {
-                                p.circle_filled(egui::pos2(rr.left() + 15.0, rr.center().y), 3.5, c);
+                                let dc = egui::pos2(rr.left() + 15.0, rr.center().y);
+                                p.circle_filled(dc, 3.5, c);
+                                if t.busy > 0 {
+                                    widgets::paint_busy_ring(p, dc, 7.0, ui.input(|i| i.time) as f32);
+                                    ui.ctx().request_repaint_after(Duration::from_millis(33));
+                                }
                             }
                             let mut tx = rr.left() + 26.0;
                             if let Some(img) = &t.image {
@@ -317,11 +329,18 @@ impl App {
         }
     }
 
+    /// How many of a project's sessions are working on a task right now.
+    fn project_busy(&self, p: &Path) -> usize {
+        self.tabs.iter().filter(|t| t.project == p && t.sess.busy && t.sess.exited.is_none()).count()
+    }
+
     /// A project's activity dot: needs you, unseen output, running, or has saved sessions.
+    /// A session still working doesn't count as unseen output (it prints all the time, so the
+    /// dot would flip orange the moment you leave the tab); it shows as the tab's busy ring.
     fn project_dot(&self, p: &Path) -> Option<Color32> {
         if self.tabs.iter().any(|t| t.project == p && t.sess.attention.is_some()) {
             Some(ACCENT_HI)
-        } else if self.tabs.iter().any(|t| t.project == p && t.sess.unseen) {
+        } else if self.tabs.iter().any(|t| t.project == p && t.sess.unseen && !t.sess.busy) {
             Some(ORANGE)
         } else if !self.project_sessions(p).is_empty() {
             Some(GREEN.gamma_multiply(0.8))
@@ -351,7 +370,9 @@ impl App {
             let total: f64 = self.tabs.iter().filter(|t| t.project == path).filter_map(|t| t.sess.cost.map(|c| c.usd)).sum::<f64>() + self.dormant.iter().filter(|d| d.saved.project == path).filter_map(|d| d.saved.cost).sum::<f64>();
             if total > 0.0 { format!("\nEstimated cost {}", crate::cost::fmt_usd(total)) } else { String::new() }
         };
-        format!("{n} session{}{cost_line}", if n == 1 { "" } else { "s" })
+        let busy = self.project_busy(path);
+        let busy_part = if busy > 0 { format!(", {busy} working") } else { String::new() };
+        format!("{n} session{}{busy_part}{cost_line}", if n == 1 { "" } else { "s" })
     }
 
     /// Moves a project in the project list (the tab order) to just before `before` (None = the end).
@@ -684,6 +705,8 @@ struct TabInfo {
     proj: Project,
     sel: bool,
     dot: Option<Color32>,
+    /// Sessions working on a task right now.
+    busy: usize,
     image: Option<PathBuf>,
     /// Full width of the name.
     name_w: f32,
