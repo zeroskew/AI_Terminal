@@ -9,7 +9,7 @@ impl App {
     pub(super) fn session_json(&self, id: u64) -> Option<serde_json::Value> {
         use serde_json::json;
         if let Some(t) = self.tabs.iter().find(|t| t.sess.id == id) {
-            let state = if t.sess.attention.is_some() {
+            let state = if t.sess.attention.is_some() || t.sess.done {
                 "NeedsAttention"
             } else if t.sess.busy {
                 "Processing"

@@ -25,8 +25,9 @@ installs it over the exe you started (Options > General > Updates).
 ## Features
 
 - **Layout**: project tabs across the top (Home + a tab per project ticked **Show in tabs**;
-  a dot shows sessions, orange when one finished with new output you haven't seen, with a
-  spinning ring while a task is running), a "+" after the tabs adds a project.
+  a dot shows sessions: grey saved only, green live, orange new output since you last visited
+  the tab, blue a session needs you (a permission prompt, a question, the bell; a finished turn is
+  orange "done"), with a spinning ring while a task is running), a "+" after the tabs adds a project.
   With many tabs, long names are cut with "…" first; tabs that still don't fit go into a "»"
   menu (with a filter box once it gets long). The selected tab always stays in the bar, the "»"
   shows a dot when a project in it has new activity, picking one moves it into the bar, and
@@ -187,11 +188,14 @@ after saving.
   when it waits (from the hooks), also as a pill in the session header.
 - **Snippets** (Options > Snippets, Ctrl+Shift+S or the header button): saved prompts inserted as a
   paste, optionally followed by Enter.
-- **Scripts** (Ctrl+Shift+R or the header button): `.ps1`, `.cmd`, `.bat` and `.py` files in the
-  `scripts` folder next to `ai_terminal.exe`, run in the background in the current project (no
+- **Scripts** (Ctrl+Shift+R or the header button): `.ps1`, `.cmd`, `.bat` and `.py` files, from
+  two places: the project's own `scripts` folder (listed only in that project) and
+  `scripts_common` next to `ai_terminal.exe` (listed in every project; switch them off for a
+  project with **Common** in the palette, or limit one script to some projects in Options >
+  Scripts). They run in the background in the current project (no
   session): a small panel at the bottom right shows the output, takes typed answers when the
   script asks something, and has Stop / Run again; a toast says when it's done. The palette shows each script's first comment
-  line. The folder is created empty on first use. Options > Scripts (or "Edit scripts…" in the
+  line. Options > Scripts (or "Edit scripts…" in the
   palette) edits them in place: rename, Save, Revert, Delete, open in your editor, add new ones.
   Or ask an agent to write one: **Copy prompt** there copies a starter request with the folder and
   conventions filled in; paste it into a session and say what the script should do.

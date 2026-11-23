@@ -334,13 +334,14 @@ impl App {
         self.tabs.iter().filter(|t| t.project == p && t.sess.busy && t.sess.exited.is_none()).count()
     }
 
-    /// A project's activity dot: needs you, unseen output, running, or has saved sessions.
+    /// A project's activity dot: needs you (blue), output since you last visited the project
+    /// (orange), live sessions (green), or only saved sessions (grey).
     /// A session still working doesn't count as unseen output (it prints all the time, so the
     /// dot would flip orange the moment you leave the tab); it shows as the tab's busy ring.
     fn project_dot(&self, p: &Path) -> Option<Color32> {
         if self.tabs.iter().any(|t| t.project == p && t.sess.attention.is_some()) {
             Some(ACCENT_HI)
-        } else if self.tabs.iter().any(|t| t.project == p && t.sess.unseen && !t.sess.busy) {
+        } else if self.tabs.iter().any(|t| t.project == p && t.sess.unseen && !t.sess.unseen_acked && !t.sess.busy) {
             Some(ORANGE)
         } else if !self.project_sessions(p).is_empty() {
             Some(GREEN.gamma_multiply(0.8))

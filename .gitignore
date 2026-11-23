@@ -1,9 +1,9 @@
 /target
-/dist
+/dist/*
+!/dist/scripts_common/
 *.png
 !assets/*.png
 run.log
 /backups
 .claude/settings.local.json
 !screenshots/*.png
-/scripts

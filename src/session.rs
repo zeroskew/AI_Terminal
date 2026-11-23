@@ -221,6 +221,12 @@ pub struct Session {
     pub exited: Option<i32>,
     /// Output arrived while the session wasn't visible.
     pub unseen: bool,
+    /// Its project tab was visited since the latest unseen output: the tab's dot stops
+    /// showing it (the session's own row in the list still does until you open it).
+    pub unseen_acked: bool,
+    /// Claude finished its turn while you weren't looking at the session (cleared by opening
+    /// it). Unlike `attention`, nothing is blocked on you.
+    pub done: bool,
     /// Set by the terminal thread on any event (output, title, cursor, replies); taken by the
     /// unseen check each frame.
     pub dirty: Arc<AtomicBool>,
@@ -318,6 +324,8 @@ impl Session {
             title: None,
             exited: None,
             unseen: false,
+            unseen_acked: false,
+            done: false,
             dirty,
             seen_hash: 0,
             agent_id: resume,

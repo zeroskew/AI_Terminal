@@ -158,7 +158,7 @@ impl App {
     fn fav_key(&self, f: Fav) -> (FavList, String) {
         match f {
             Fav::Snippet(i) => (FavList::Snippets, self.s.snippets[i].name.clone()),
-            Fav::Script(i) => (FavList::Scripts, scripts::script_key(&self.scripts[i].path).unwrap_or_default()),
+            Fav::Script(i) => (FavList::Scripts, self.scripts[i].key()),
         }
     }
 
@@ -284,7 +284,7 @@ impl App {
                     }
                     Fav::Script(i) => {
                         let sc = &self.scripts[i];
-                        let key = scripts::script_key(&sc.path).unwrap_or_default();
+                        let key = sc.key();
                         (sc.name.clone(), "", format!("{}\n\nScript: {click} to run it in the background in {project}", sc.desc), true, FavList::Scripts, key)
                     }
                 };

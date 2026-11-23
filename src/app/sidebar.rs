@@ -146,6 +146,7 @@ impl App {
                 resumable: t.sess.agent_id.is_some(),
             unrestricted: t.sess.opts.unrestricted,
             attention: t.sess.attention.is_some(),
+            done: t.sess.done,
             busy: t.sess.busy && t.sess.exited.is_none(),
             attention_msg: t.sess.attention.clone(),
             pin: t.pin,
@@ -169,6 +170,7 @@ impl App {
             resumable: d.saved.agent_id.is_some(),
             unrestricted: d.saved.opts.unrestricted,
             attention: false,
+            done: false,
             busy: false,
             attention_msg: None,
             pin: d.saved.pin,
@@ -445,7 +447,7 @@ impl App {
                 }
                 if row.attention {
                     p.circle_filled(egui::pos2(rect.left() + 24.0, rect.center().y - 6.0), 3.5, ACCENT_HI);
-                } else if row.unseen && !selected {
+                } else if (row.unseen || row.done) && !selected {
                     p.circle_filled(egui::pos2(rect.left() + 23.0, rect.center().y - 6.0), 3.0, ORANGE);
                 }
                 let col = if !row.live {
@@ -466,7 +468,7 @@ impl App {
                 let buttons_w = if row.live { 50.0 } else if set_aside { 0.0 } else { 26.0 };
                 let right_w = if hovered {
                     buttons_w
-                } else if let Some(label) = status_label(&row) {
+                } else if let Some((label, _)) = status_label(&row) {
                     text_w(label.to_string())
                 } else {
                     if row.images > 0 { text_w(row.images.to_string()) + 21.0 } else { 0.0 }
@@ -512,8 +514,8 @@ impl App {
                         }
                         close_resp.on_hover_text("Close: stop it, keep it in the list");
                     }
-                } else if let Some(label) = status_label(&row) {
-                    p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.5), ACCENT_HI);
+                } else if let Some((label, c)) = status_label(&row) {
+                    p.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, label, egui::FontId::proportional(11.5), c);
                 } else if n > 0 {
                     let x = rect.right() - 10.0;
                     p.text(egui::pos2(x, rect.center().y), egui::Align2::RIGHT_CENTER, n.to_string(), egui::FontId::proportional(11.5), TEXT_DIM);
@@ -548,7 +550,11 @@ impl App {
                 let now = if row.busy {
                     "\nWorking…".to_string()
                 } else {
-                    row.attention_msg.as_ref().map(|m| format!("\nNeeds you: {m}")).unwrap_or_default()
+                    match &row.attention_msg {
+                        Some(m) => format!("\nNeeds you: {m}"),
+                        None if row.done => "\nDone: finished while you were away".to_string(),
+                        None => String::new(),
+                    }
                 };
                 // Profile · model · effort, then when it was created / last used and its cost.
                 let mut head = vec![row.profile.name.clone()];

@@ -62,7 +62,7 @@ pub struct Project {
     /// Snippets (by name) in this project's Favourites panel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fav_snippets: Vec<String>,
-    /// Scripts (lowercase file names, like `script_models`) in this project's Favourites panel.
+    /// Scripts (keys, see `scripts::Script::key`) in this project's Favourites panel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fav_scripts: Vec<String>,
     /// The Favourites panel's order (dragged by the user), as `snippet:<name>` / `script:<key>`.
@@ -150,6 +150,8 @@ struct Row {
     resumable: bool,
     unrestricted: bool,
     attention: bool,
+    /// Finished its turn while you were away.
+    done: bool,
     /// Claude is working (hooks).
     busy: bool,
     /// Why it needs you (Claude's message), when it does.
@@ -354,12 +356,15 @@ pub struct Settings {
     pub script_dismiss_secs: u32,
     /// Start a script's panel minimized to a pill (it opens when the script asks a question).
     pub script_start_minimized: bool,
-    /// The AI model per script (key: lowercase file name, e.g. "commit and push.ps1"), passed to it
-    /// as AI_TERMINAL_CLI / AI_TERMINAL_MODEL / AI_TERMINAL_EFFORT. No entry = the script's own default.
+    /// The AI model per script (key: `scripts::Script::model_key`, e.g. "common/commit.ps1" or
+    /// "x:\proj|push.ps1"), passed to it as AI_TERMINAL_CLI / AI_TERMINAL_MODEL / AI_TERMINAL_EFFORT.
+    /// No entry = the script's own default.
     pub script_models: std::collections::HashMap<String, ScriptModel>,
-    /// Scripts limited to some projects (key: lowercase file name, like `script_models`): listed
-    /// only in those projects. No entry = every project.
+    /// Common scripts limited to some projects (key: `scripts::Script::key`, "common/<file>"):
+    /// listed only in those projects. No entry = every project.
     pub script_projects: std::collections::HashMap<String, Vec<PathBuf>>,
+    /// Projects that don't list the common scripts (`<exe folder>\scripts_common`).
+    pub common_scripts_off: Vec<PathBuf>,
     /// Script panel width and output height, once resized (None = default, output fits its text).
     pub script_panel_size: Option<[f32; 2]>,
     /// Search window: every session (else the current one), and how many days back (0 = all).
@@ -451,6 +456,7 @@ impl Default for Settings {
             script_start_minimized: true,
             script_models: Default::default(),
             script_projects: Default::default(),
+            common_scripts_off: Vec::new(),
             script_panel_size: None,
             search_all: true,
             search_days: 0,
@@ -683,8 +689,10 @@ pub struct App {
     /// Options > Scripts editor state.
     script_drafts: Vec<scripts::ScriptDraft>,
     scripts_synced: bool,
-    /// The scripts folder was read for the Favourites panel.
-    scripts_scanned: bool,
+    /// The project `scripts` was read for (it lists that project's scripts and the common ones).
+    scripts_for: Option<PathBuf>,
+    /// The project `script_drafts` were made for.
+    script_drafts_for: Option<PathBuf>,
     /// Options > Snippets: (row, name) when its name box got focus, to move stars on rename.
     snippet_name_before: Option<(usize, String)>,
     /// When a Favourites row last ran, so a double-click doesn't run it twice.
@@ -760,6 +768,10 @@ impl App {
         if s.editor.is_empty() {
             s.editor = "auto".into();
         }
+        if s.version < 11 {
+            // Scripts moved from one folder next to the exe into each project's `scripts` folder.
+            scripts::migrate_settings(&mut s);
+        }
         if s.version < 10 {
             // Closing used to follow "minimize to tray".
             s.close_action = if s.minimize_to_tray { "tray" } else { "exit" }.into();
@@ -789,7 +801,7 @@ impl App {
             s.default_profile = crate::session::CLAUDE.into();
             s.version = 4;
         }
-        s.version = s.version.max(10);
+        s.version = s.version.max(11);
         // The registry is the truth for "launch on startup" (the user may have removed it).
         s.launch_on_startup = winsys::autostart_enabled();
         crate::dlog::ENABLED.store(s.debug_logging, std::sync::atomic::Ordering::Relaxed);
@@ -865,7 +877,8 @@ impl App {
             scripts: Vec::new(),
             script_drafts: Vec::new(),
             scripts_synced: false,
-            scripts_scanned: false,
+            scripts_for: None,
+            script_drafts_for: None,
             snippet_name_before: None,
             fav_last_pick: None,
             script_new_ext: "ps1".into(),
@@ -1479,6 +1492,7 @@ impl App {
                 "active" => {
                     t.sess.busy = true;
                     t.sess.attention = None;
+                    t.sess.done = false;
                 }
                 "stop" | "notify" => {
                     // Waiting for you either way (a Notification is e.g. a permission prompt).
@@ -1498,7 +1512,14 @@ impl App {
                     };
                     crate::dlog!("attention check #{}: window focused={focused}, active={:?}", t.sess.id, active);
                     if !(focused && active == Some(t.sess.id)) {
-                        t.sess.attention = Some(msg.clone());
+                        if ev.event == "stop" {
+                            // Finished: new output to look at (orange), not blocked on you (blue).
+                            t.sess.done = true;
+                            t.sess.unseen = true;
+                            t.sess.unseen_acked = false;
+                        } else {
+                            t.sess.attention = Some(msg.clone());
+                        }
                         alerts.push((t.sess.id, msg));
                     }
                 }
@@ -1522,6 +1543,7 @@ impl App {
             // Looking at it clears the mark.
             if focused && active == Some(t.sess.id) {
                 t.sess.attention = None;
+                t.sess.done = false;
             }
         }
         for (id, msg) in &alerts {
@@ -1544,7 +1566,7 @@ impl App {
         }
 
         // Taskbar badge: a mark (or the count) while sessions need attention.
-        let count = self.tabs.iter().filter(|t| t.sess.attention.is_some()).count();
+        let count = self.tabs.iter().filter(|t| t.sess.attention.is_some() || t.sess.done).count();
         let want = (count > 0).then(|| if self.s.badge_count { count } else { 0 });
         if self.last_badge != Some(want) {
             match want {
@@ -1662,6 +1684,7 @@ impl eframe::App for App {
         let claimed: std::collections::HashSet<String> =
             self.tabs.iter().filter_map(|t| t.sess.agent_id.clone()).chain(self.dormant.iter().filter_map(|d| d.saved.agent_id.clone())).collect();
         let color_tags = self.s.color_tags;
+        let selected_project = self.s.selected_project.clone();
         for t in &mut self.tabs {
             t.sess.poll_agent(&claimed);
             let (clip, bell) = t.sess.poll();
@@ -1681,6 +1704,11 @@ impl eframe::App for App {
                 t.sess.unseen = false;
             } else if changed && t.sess.screen_hash() != t.sess.seen_hash {
                 t.sess.unseen = true;
+                t.sess.unseen_acked = false;
+            }
+            // Looking at the project acknowledges its sessions' new output for the tab's dot.
+            if t.sess.unseen && selected_project.as_deref() == Some(t.project.as_path()) {
+                t.sess.unseen_acked = true;
             }
         }
         self.mcp_pump(&ctx);
@@ -1992,11 +2020,14 @@ fn is_home_dir(p: &Path) -> bool {
     std::env::var_os("USERPROFILE").is_some_and(|h| Path::new(&h) == p)
 }
 
-/// Short status shown at the right of a session row: working / waiting for permission / needs you.
-fn status_label(row: &Row) -> Option<&'static str> {
+/// Short status shown at the right of a session row, with its colour: working / waiting for
+/// permission / needs you / done (finished while you were away).
+fn status_label(row: &Row) -> Option<(&'static str, Color32)> {
     if row.busy {
-        return Some("working…");
+        return Some(("working…", ACCENT_HI));
     }
-    let m = row.attention_msg.as_ref()?;
-    Some(if m.to_lowercase().contains("permission") { "permission" } else { "needs you" })
+    match &row.attention_msg {
+        Some(m) => Some((if m.to_lowercase().contains("permission") { "permission" } else { "needs you" }, ACCENT_HI)),
+        None => row.done.then_some(("done", ORANGE)),
+    }
 }

@@ -1,11 +1,12 @@
-//! Scripts: files in the `scripts` folder next to the executable, run from a palette in the
+//! Scripts: files in the project's `scripts` folder (that project only) and in `scripts_common`
+//! next to the executable (every project, unless switched off), run from a palette in the
 //! current project in the background (no session): output shows in a small panel, which also
 //! takes typed answers for scripts that ask questions.
 
 use super::*;
 use std::time::Instant;
 
-/// A runnable file in the scripts folder.
+/// A runnable file in a scripts folder.
 #[derive(Clone)]
 pub(super) struct Script {
     pub name: String,
@@ -14,23 +15,66 @@ pub(super) struct Script {
     pub desc: String,
     /// It takes its AI model from the app (see `uses_ai`).
     pub ai: bool,
+    /// From `scripts_common` (shared by all projects), else from the project's `scripts` folder.
+    pub common: bool,
+}
+
+impl Script {
+    /// The key for favourites and project limits (see `key_for`).
+    pub fn key(&self) -> String {
+        key_for(&self.path, self.common)
+    }
+
+    /// The key in `script_models` (see `model_key_for`).
+    fn model_key(&self) -> String {
+        model_key_for(&self.path, self.common)
+    }
+}
+
+/// Favourites / project-limit key: the lowercase file name, with "common/" in front for a
+/// common script (a project's own lists only ever see that project's scripts).
+fn key_for(path: &Path, common: bool) -> String {
+    let file = path.file_name().map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if common { format!("common/{file}") } else { file }
+}
+
+/// `script_models` key: "common/<file>", or "<project folder>|<file>" (lowercase) for a project
+/// script, since one file name can be in several projects.
+fn model_key_for(path: &Path, common: bool) -> String {
+    if common {
+        return key_for(path, true);
+    }
+    let project = path.parent().and_then(|d| d.parent()).map(|p| p.display().to_string().to_lowercase()).unwrap_or_default();
+    format!("{project}|{}", key_for(path, false))
 }
 
 /// File types the palette lists.
 const KINDS: [&str; 4] = ["ps1", "cmd", "bat", "py"];
 
-/// `<exe folder>\scripts`.
-pub(super) fn scripts_dir() -> PathBuf {
-    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("scripts"))).unwrap_or_else(|| PathBuf::from("scripts"))
+/// `<exe folder>\scripts_common`: scripts listed in every project.
+pub(super) fn common_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("scripts_common"))).unwrap_or_else(|| PathBuf::from("scripts_common"))
 }
 
-/// Lists the scripts, sorted by name. Creates the folder the first time.
-fn scan() -> Vec<Script> {
-    let dir = scripts_dir();
-    if !dir.exists() {
-        let _ = std::fs::create_dir_all(&dir);
+/// `<project>\scripts`: that project's own scripts.
+pub(super) fn project_dir(project: &Path) -> PathBuf {
+    project.join("scripts")
+}
+
+/// The project's scripts, then the common ones, each sorted by name. Creates the common folder
+/// the first time (not the project's: that waits for its first script).
+fn scan(project: &Path) -> Vec<Script> {
+    let common = common_dir();
+    if !common.exists() {
+        let _ = std::fs::create_dir_all(&common);
     }
-    let mut v: Vec<Script> = std::fs::read_dir(&dir)
+    let mut v = scan_dir(&project_dir(project), false);
+    v.extend(scan_dir(&common, true));
+    v
+}
+
+fn scan_dir(dir: &Path, common: bool) -> Vec<Script> {
+    let mut v: Vec<Script> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -44,11 +88,61 @@ fn scan() -> Vec<Script> {
             let name = path.file_stem()?.to_string_lossy().into_owned();
             let text = std::fs::read_to_string(&path).unwrap_or_default();
             let desc = first_comment(&text).unwrap_or_else(|| format!(".{ext} script"));
-            Some(Script { name, path, desc, ai: uses_ai(&text) })
+            Some(Script { name, path, desc, ai: uses_ai(&text), common })
         })
         .collect();
     v.sort_by_key(|s| s.name.to_lowercase());
     v
+}
+
+/// Moves script settings to the per-project folders (settings version 11). They used to be keyed
+/// by file name for the one folder next to the exe; now a file name is either a project's script
+/// (found in `<project>\scripts`) or a common one (found in `scripts_common`).
+pub(super) fn migrate_settings(s: &mut Settings) {
+    let common = common_dir();
+    let old = |k: &str| !k.starts_with("common/") && !k.contains('|');
+    let in_common = |k: &str| common.join(k).is_file();
+    let models = std::mem::take(&mut s.script_models);
+    for (k, m) in models {
+        if !old(&k) {
+            s.script_models.insert(k, m);
+            continue;
+        }
+        if in_common(&k) {
+            s.script_models.insert(format!("common/{k}"), m.clone());
+        }
+        for p in &s.projects {
+            let f = project_dir(&p.path).join(&k);
+            if f.is_file() {
+                s.script_models.insert(model_key_for(&f, false), m.clone());
+            }
+        }
+    }
+    // Project limits only apply to common scripts now (a project's scripts are its own).
+    let scopes = std::mem::take(&mut s.script_projects);
+    s.script_projects = scopes.into_iter().filter_map(|(k, v)| if !old(&k) { Some((k, v)) } else { in_common(&k).then(|| (format!("common/{k}"), v)) }).collect();
+    // Favourites: a name that's now only in the common folder becomes its common key.
+    let to_common = |k: &mut String, project: Option<&Path>| {
+        if old(k) && !project.is_some_and(|p| project_dir(p).join(&*k).is_file()) && in_common(k) {
+            *k = format!("common/{k}");
+        }
+    };
+    for k in s.pinned_scripts.iter_mut() {
+        to_common(k, None);
+    }
+    for p in s.projects.iter_mut() {
+        let path = p.path.clone();
+        for k in p.fav_scripts.iter_mut() {
+            to_common(k, Some(&path));
+        }
+        for t in p.fav_order.iter_mut() {
+            if let Some(k) = t.strip_prefix("script:") {
+                let mut k = k.to_string();
+                to_common(&mut k, Some(&path));
+                *t = format!("script:{k}");
+            }
+        }
+    }
 }
 
 /// The first comment line (`#`, `::`, `REM`), skipping `@echo off` and blank lines.
@@ -80,14 +174,34 @@ impl App {
         if self.s.projects.is_empty() {
             return;
         }
-        self.scripts = scan();
+        self.refresh_scripts();
         self.scripts_open = true;
         self.script_focus = true;
     }
 
+    /// Reads the current project's scripts and the common ones.
+    pub(super) fn refresh_scripts(&mut self) {
+        let cur = self.current_project();
+        self.scripts = scan(&cur);
+        self.scripts_for = Some(cur);
+    }
+
+    /// Whether the project lists the common scripts (not switched off for it).
+    pub(super) fn common_scripts_on(&self, project: &Path) -> bool {
+        !self.s.common_scripts_off.iter().any(|p| p == project)
+    }
+
+    /// Switches the common scripts on or off for a project.
+    pub(super) fn set_common_scripts(&mut self, project: &Path, on: bool) {
+        self.s.common_scripts_off.retain(|p| p != project);
+        if !on {
+            self.s.common_scripts_off.push(project.to_path_buf());
+        }
+    }
+
     /// Test hook (--run-script <name>): runs the script with that name in the current project.
     pub(super) fn run_script_named(&mut self, ctx: &egui::Context, name: &str) {
-        if let Some(sc) = scan().into_iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
+        if let Some(sc) = scan(&self.current_project()).into_iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
             self.run_script(ctx, &sc);
         }
     }
@@ -100,11 +214,11 @@ impl App {
         }
         if !sc.path.is_file() {
             // Renamed or deleted outside the app: reload the list so it stops showing.
-            self.scripts = scan();
+            self.refresh_scripts();
             return self.toast(format!("Script not found: {}", sc.path.display()), RED, ctx);
         }
         let (program, args) = script_command(sc, self.pwsh());
-        let env = self.script_model(&sc.path).map(|m| vec![("AI_TERMINAL_CLI".to_string(), m.cli), ("AI_TERMINAL_MODEL".to_string(), m.model), ("AI_TERMINAL_EFFORT".to_string(), m.effort)]).unwrap_or_default();
+        let env = self.script_model(sc).map(|m| vec![("AI_TERMINAL_CLI".to_string(), m.cli), ("AI_TERMINAL_MODEL".to_string(), m.model), ("AI_TERMINAL_EFFORT".to_string(), m.effort)]).unwrap_or_default();
         match ScriptRun::start(ctx, sc.name.clone(), program, args, project, None, env) {
             Ok(mut r) => {
                 r.minimized = self.s.script_start_minimized;
@@ -114,15 +228,19 @@ impl App {
         }
     }
 
-    /// Whether a script is listed in the current project (not limited to other projects).
+    /// Whether a script is listed in the current project: its own scripts always, a common one
+    /// unless common scripts are off there or it's limited to other projects.
     pub(super) fn script_in_project(&self, sc: &Script) -> bool {
+        if !sc.common {
+            return true;
+        }
         let cur = self.current_project();
-        script_key(&sc.path).and_then(|k| self.s.script_projects.get(&k)).is_none_or(|ps| ps.is_empty() || ps.contains(&cur))
+        self.common_scripts_on(&cur) && self.s.script_projects.get(&sc.key()).is_none_or(|ps| ps.is_empty() || ps.contains(&cur))
     }
 
     /// The model picked for a script in Options > Scripts (None = the script's own default).
-    fn script_model(&self, path: &Path) -> Option<ScriptModel> {
-        self.s.script_models.get(&script_key(path)?).filter(|m| !m.model.is_empty()).cloned()
+    fn script_model(&self, sc: &Script) -> Option<ScriptModel> {
+        self.s.script_models.get(&sc.model_key()).filter(|m| !m.model.is_empty()).cloned()
     }
 
     /// pwsh if it's installed, else Windows PowerShell.
@@ -443,17 +561,15 @@ impl App {
         self.script_runs.retain(|r| !close.contains(&r.id));
     }
 
-    /// The current project's starred scripts that exist in the scripts folder (reads it once if
-    /// the palette hasn't yet).
+    /// The current project's starred scripts that exist (reads the folders when the project changed).
     pub(super) fn fav_script_list(&mut self) -> Vec<usize> {
         if self.fav_list(super::favorites::FavList::Scripts).is_empty() && self.s.pinned_scripts.is_empty() {
             return Vec::new();
         }
-        if !self.scripts_scanned && self.scripts.is_empty() {
-            self.scripts = scan();
+        if self.scripts_for.as_ref() != Some(&self.current_project()) {
+            self.refresh_scripts();
         }
-        self.scripts_scanned = true;
-        (0..self.scripts.len()).filter(|&i| self.script_in_project(&self.scripts[i]) && script_key(&self.scripts[i].path).is_some_and(|k| self.is_fav(super::favorites::FavList::Scripts, &k))).collect()
+        (0..self.scripts.len()).filter(|&i| self.script_in_project(&self.scripts[i]) && self.is_fav(super::favorites::FavList::Scripts, &self.scripts[i].key())).collect()
     }
 
     /// The scripts palette (Ctrl+Shift+R or the header button): filter, Enter = first match.
@@ -465,7 +581,9 @@ impl App {
         let mut close = false;
         let mut edit = false;
         let mut star: Option<String> = None;
-        let project = project_name(&self.current_project());
+        let cur = self.current_project();
+        let project = project_name(&cur);
+        let mut common_on = self.common_scripts_on(&cur);
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
         let m = egui::Modal::new(egui::Id::unique("scripts")).frame(egui::Frame::new().fill(PANEL).corner_radius(10).stroke(Stroke::new(1.0, BORDER)).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(560.0);
@@ -476,15 +594,18 @@ impl App {
                     if widgets::corner_close_button(ui, 16.0).clicked() {
                         close = true;
                     }
-                    if ui.button("Open folder").on_hover_text(scripts_dir().display().to_string()).clicked() {
-                        let _ = std::process::Command::new("explorer.exe").arg(scripts_dir()).spawn();
+                    let dir = project_dir(&cur);
+                    if ui.button("Open folder").on_hover_text(format!("This project's scripts: {}", dir.display())).clicked() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
                     }
                     if ui.button("Refresh").clicked() {
-                        self.scripts = scan();
+                        self.refresh_scripts();
                     }
                     if ui.button("Edit scripts…").clicked() {
                         edit = true;
                     }
+                    ui.checkbox(&mut common_on, "Common").on_hover_text(format!("List the common scripts (shared by every project) in {project}: {}", common_dir().display()));
                 });
             });
             let te = ui.add(egui::TextEdit::singleline(&mut self.script_filter).hint_text("Filter").desired_width(f32::INFINITY));
@@ -499,20 +620,23 @@ impl App {
                 pick = shown.first().copied();
             }
             if here.is_empty() && !self.scripts.is_empty() {
-                ui.label(RichText::new(format!("No scripts for {project}. The others are limited to other projects (Edit scripts… > Projects).")).color(TEXT_FAINT));
+                ui.label(RichText::new(format!("No scripts for {project}. The common ones are switched off here or limited to other projects (Edit scripts…).")).color(TEXT_FAINT));
             } else if self.scripts.is_empty() {
-                ui.label(RichText::new("No scripts yet. Put .ps1, .cmd, .bat or .py files in the scripts folder (Open folder), or ask an agent to write one (Edit scripts… > Copy prompt).").color(TEXT_FAINT));
+                ui.label(RichText::new(format!("No scripts yet. Put .ps1, .cmd, .bat or .py files in {project}'s scripts folder (Open folder) or in the common folder for every project, or ask an agent to write one (Edit scripts… > Copy prompt).")).color(TEXT_FAINT));
             }
             super::snippets::palette_scroll(ui, shown.len()).show_hinted(ui, |ui| {
                 for i in shown {
                     let sc = &self.scripts[i];
                     // The AI model it will use, else the file type.
-                    let note = if sc.ai { model_note(&catalog, self.script_model(&sc.path).as_ref()) } else { sc.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase() };
+                    let note = if sc.ai { model_note(&catalog, self.script_model(sc).as_ref()) } else { sc.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase() };
+                    let note = if sc.common { format!("common · {note}") } else { note };
                     let mut row = super::snippets::palette_row(ui, &sc.name, &sc.desc, &note, 28.0);
                     if sc.ai {
                         row = row.on_hover_text("Uses this AI model. Change it in Edit scripts…");
+                    } else if sc.common {
+                        row = row.on_hover_text("A common script, listed in every project");
                     }
-                    let key = script_key(&sc.path).unwrap_or_default();
+                    let key = sc.key();
                     let fav = self.is_fav(super::favorites::FavList::Scripts, &key);
                     let sr = egui::Rect::from_center_size(egui::pos2(row.rect.right() - 20.0, row.rect.center().y), Vec2::splat(26.0));
                     if super::snippets::star_button(ui, sr, egui::Id::unique(("script_star", i)), fav).clicked() {
@@ -528,6 +652,9 @@ impl App {
         }
         if let Some(key) = star {
             self.toggle_fav(super::favorites::FavList::Scripts, &key);
+        }
+        if common_on != self.common_scripts_on(&cur) {
+            self.set_common_scripts(&cur, common_on);
         }
         // A started script's answer box takes the keyboard, so the terminal doesn't.
         let mut started = false;
@@ -558,11 +685,6 @@ fn script_command(sc: &Script, pwsh: String) -> (String, Vec<String>) {
         "py" => ("python.exe".into(), vec!["-u".into(), path]),
         _ => (std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()), vec!["/c".into(), path]),
     }
-}
-
-/// The settings key for a script's model: its lowercase file name.
-pub(super) fn script_key(path: &Path) -> Option<String> {
-    Some(path.file_name()?.to_string_lossy().to_lowercase())
 }
 
 /// Whether a script takes its AI model from the app (reads AI_TERMINAL_MODEL): only those get a
@@ -781,6 +903,8 @@ pub(super) struct ScriptDraft {
     error: Option<String>,
     /// The source box is shown (collapsed by default so a long list stays short).
     expanded: bool,
+    /// A common script (`scripts_common`), else one of the current project's.
+    common: bool,
 }
 
 impl ScriptDraft {
@@ -791,14 +915,20 @@ impl ScriptDraft {
     fn from_file(s: &Script) -> Self {
         let text = std::fs::read_to_string(&s.path).unwrap_or_default().trim_start_matches('\u{feff}').replace("\r\n", "\n");
         let ext = s.path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-        ScriptDraft { path: Some(s.path.clone()), name: s.name.clone(), ext, saved_name: s.name.clone(), saved_text: text.clone(), text, confirm_delete: false, error: None, expanded: false }
+        ScriptDraft { path: Some(s.path.clone()), name: s.name.clone(), ext, saved_name: s.name.clone(), saved_text: text.clone(), text, confirm_delete: false, error: None, expanded: false, common: s.common }
     }
 
-    /// Writes the file, renaming it first when the name changed. Batch files get CRLF.
-    fn save(&mut self) -> Result<(), String> {
-        self.save_in(&scripts_dir())
+    /// Its favourites / project-limit key, once saved (see `key_for`).
+    fn key(&self) -> Option<String> {
+        self.path.as_deref().map(|p| key_for(p, self.common))
     }
 
+    /// Its `script_models` key, once saved.
+    fn model_key(&self) -> Option<String> {
+        self.path.as_deref().map(|p| model_key_for(p, self.common))
+    }
+
+    /// Writes the file into `dir`, renaming it first when the name changed. Batch files get CRLF.
     fn save_in(&mut self, dir: &Path) -> Result<(), String> {
         let name = self.name.trim().to_string();
         if name.is_empty() {
@@ -988,14 +1118,15 @@ fn model_picker(ui: &mut Ui, i: usize, catalog: &agents::Catalog, models: &mut s
 }
 
 /// A starter request for an agent to write a script (Options > Scripts > Copy prompt).
-fn agent_prompt(dir: &Path) -> String {
+fn agent_prompt(dir: &Path, common: &Path) -> String {
     format!(
-        "Write a script for AI Terminal's Scripts palette and save it in {} (a .ps1 file unless I ask otherwise; .cmd, .bat and .py also work). \
+        "Write a script for AI Terminal's Scripts palette and save it in {} (this project's scripts; a script every project should list goes in {} instead). Make it a .ps1 file unless I ask otherwise; .cmd, .bat and .py also work. \
 The file name, without the extension, is the name shown in the palette. Start the file with a one-line comment describing what it does: it's shown as the description. \
 It runs hidden in the current project's folder, with its output shown in a small panel that also has a text box for answers, so it can ask questions. Read-Host doesn't show its prompt there: Write-Host the question first, and treat no answer ($null, end of input) as cancel. For git commands, set $env:GIT_PAGER = 'cat'. \
 If it needs an LLM, call `claude -p --model haiku --tools '\"\"' --strict-mcp-config --no-session-persistence --system-prompt \"...\"` with only the input it needs, to keep it cheap. The model can be picked per script in the app: when set, it's in $env:AI_TERMINAL_CLI ('claude', 'codex' or 'antigravity') and $env:AI_TERMINAL_MODEL; use them when present. For codex: `codex exec -m <model> --skip-git-repo-check --sandbox read-only --output-last-message <file> -` with the prompt on stdin, then read the file. For antigravity: `agy --model <model> --disable-slash-commands --input-format stream-json --output-format stream-json -p \"\"` with one line on stdin, `{{\"event\":\"user\",\"message\":{{\"content\":\"<prompt>\"}}}}` (build it with ConvertTo-Json -Compress); the answer is in result.response of the output line whose event is \"result\". \
 The script should: ",
-        dir.display()
+        dir.display(),
+        common.display()
     )
 }
 
@@ -1009,11 +1140,16 @@ fn template(ext: &str) -> String {
 }
 
 impl App {
-    /// Reloads the editor list from disk, keeping unsaved edits and new scripts.
+    /// Reloads the editor list from disk (the current project's scripts and the common ones),
+    /// keeping unsaved edits and new scripts. Switching projects drops the other project's drafts.
     fn sync_script_drafts(&mut self) {
+        let cur = self.current_project();
         let mut old = std::mem::take(&mut self.script_drafts);
+        if self.script_drafts_for.as_ref() != Some(&cur) {
+            old.retain(|d| d.common);
+        }
         let mut v = Vec::new();
-        for f in scan() {
+        for f in scan(&cur) {
             match old.iter().position(|d| d.path.as_ref() == Some(&f.path) && d.dirty()) {
                 Some(i) => v.push(old.remove(i)),
                 None => {
@@ -1024,20 +1160,22 @@ impl App {
         }
         v.extend(old.into_iter().filter(|d| d.path.is_none()));
         self.script_drafts = v;
+        self.script_drafts_for = Some(cur);
     }
 
     pub(super) fn options_scripts(&mut self, ui: &mut Ui) {
-        if !self.scripts_synced {
+        let cur = self.current_project();
+        if !self.scripts_synced || self.script_drafts_for.as_ref() != Some(&cur) {
             self.sync_script_drafts();
             self.scripts_synced = true;
         }
-        let dir = scripts_dir();
+        let project = project_name(&cur);
+        let (pdir, cdir) = (project_dir(&cur), common_dir());
         ui.label(RichText::new("Scripts").family(bold()).size(18.0).color(TEXT));
         ui.label(
-            RichText::new(format!(
-                "Files in {}. Run one from the Scripts button in the session header or the palette (Ctrl+Shift+R): it runs in the background in the current project, with its output in a small panel at the bottom right (type answers there if it asks something). The first comment line is shown as its description.",
-                dir.display()
-            ))
+            RichText::new(
+                "Each project has its own scripts (its scripts folder), and common scripts (next to AI Terminal) are listed in every project. Run one from the Scripts button in the session header or the palette (Ctrl+Shift+R): it runs in the background in the current project, with its output in a small panel at the bottom right (type answers there if it asks something). The first comment line is shown as its description.",
+            )
             .size(12.5)
             .color(TEXT_DIM),
         );
@@ -1046,12 +1184,8 @@ impl App {
         });
         ui.horizontal(|ui| {
             if ui.button("Copy prompt").on_hover_text("Copy a starter request to paste into a Claude or Codex session").clicked() {
-                ui.ctx().copy_text(agent_prompt(&dir));
+                ui.ctx().copy_text(agent_prompt(&pdir, &cdir));
                 self.toast("Prompt copied: paste it into a session and say what the script should do".into(), GREEN, ui.ctx());
-            }
-            if ui.button("Open folder").clicked() {
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
             }
             if ui.button("Refresh").on_hover_text("Reload from disk (unsaved edits are kept)").clicked() {
                 self.sync_script_drafts();
@@ -1065,9 +1199,11 @@ impl App {
             ui.label("after a script finishes successfully (click it to keep it open)");
         });
         ui.label(RichText::new("Resize the panel by dragging its top or left edge; double-click the edge for the default size.").size(12.0).color(TEXT_FAINT));
-        ui.label(RichText::new("Projects limits a script to some projects: it's only listed in their Scripts palette and Favourites.").size(12.0).color(TEXT_FAINT));
         ui.label(RichText::new("Scripts that read $env:AI_TERMINAL_MODEL (and AI_TERMINAL_CLI) get a model picker: the Claude, Codex or Antigravity model you pick there is passed to them.").size(12.0).color(TEXT_FAINT));
-        ui.add_space(8.0);
+        let mut common_on = self.common_scripts_on(&cur);
+        // Section buttons: add a script (true = common), open a folder.
+        let mut add: Option<bool> = None;
+        let mut open_dir: Option<PathBuf> = None;
         let mut remove = None;
         let mut open: Option<PathBuf> = None;
         // A save changed what's on disk; (old key, new key) of a rename.
@@ -1077,104 +1213,147 @@ impl App {
         let models = &mut self.s.script_models;
         let scopes = &mut self.s.script_projects;
         let projects = &self.s.projects;
-        for (i, d) in self.script_drafts.iter_mut().enumerate() {
-            egui::Frame::new().fill(CARD).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut d.name).hint_text("Name").desired_width(260.0));
-                    ui.label(RichText::new(format!(".{}", d.ext)).color(TEXT_FAINT));
-                    let label = if d.expanded { "Hide script" } else { "Show script" };
-                    if ui.button(label).clicked() {
-                        d.expanded = !d.expanded;
+        for common in [false, true] {
+            let dir = if common { &cdir } else { &pdir };
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                let title = if common { "COMMON SCRIPTS".to_string() } else { format!("{} SCRIPTS", project.to_uppercase()) };
+                ui.label(RichText::new(title).size(12.0).family(bold()).color(TEXT_DIM));
+                ui.add(egui::Label::new(RichText::new(dir.display().to_string()).size(12.0).color(TEXT_FAINT)).truncate());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Open folder").on_hover_text(dir.display().to_string()).clicked() {
+                        open_dir = Some(dir.clone());
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let del = if d.confirm_delete { egui::Button::new(RichText::new("Delete file?").color(Color32::WHITE)).fill(Color32::from_rgb(150, 40, 40)) } else { egui::Button::new("Delete") };
-                        if ui.add(del).clicked() {
-                            if d.confirm_delete || d.path.is_none() {
-                                remove = Some(i);
-                            } else {
-                                d.confirm_delete = true;
-                            }
+                });
+            });
+            if common {
+                ui.label(RichText::new("Listed in every project. Projects on a script limits it to some projects.").size(12.0).color(TEXT_FAINT));
+                ui.checkbox(&mut common_on, format!("List the common scripts in {project}")).on_hover_text("Also in the Scripts palette (Common)");
+            } else {
+                ui.label(RichText::new(format!("Only listed in {project}. Select another project to edit its scripts.")).size(12.0).color(TEXT_FAINT));
+            }
+            ui.add_space(4.0);
+            let mut any = false;
+            for (i, d) in self.script_drafts.iter_mut().enumerate().filter(|(_, d)| d.common == common) {
+                any = true;
+                egui::Frame::new().fill(CARD).corner_radius(8).stroke(Stroke::new(1.0, BORDER)).inner_margin(10).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut d.name).hint_text("Name").desired_width(260.0));
+                        ui.label(RichText::new(format!(".{}", d.ext)).color(TEXT_FAINT));
+                        let label = if d.expanded { "Hide script" } else { "Show script" };
+                        if ui.button(label).clicked() {
+                            d.expanded = !d.expanded;
                         }
-                        if d.path.is_some() && ui.button("Open in editor").clicked() {
-                            open = d.path.clone();
-                        }
-                        if d.path.is_some() && d.dirty() && ui.button("Revert").clicked() {
-                            d.name = d.saved_name.clone();
-                            d.text = d.saved_text.clone();
-                            d.error = None;
-                        }
-                        // Unsaved edits (or a new script) outline Save instead of a separate badge.
-                        let mut save_btn = egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(ACCENT);
-                        if d.dirty() {
-                            save_btn = save_btn.stroke(egui::Stroke::new(2.0, Color32::from_rgb(230, 140, 40)));
-                        }
-                        let save_resp = ui.add_enabled(d.dirty(), save_btn);
-                        let save_resp = if d.dirty() {
-                            save_resp.on_hover_text(if d.path.is_none() { "New script: not saved yet" } else { "Unsaved changes" })
-                        } else {
-                            save_resp
-                        };
-                        if save_resp.clicked() {
-                            let old = d.path.as_deref().and_then(script_key);
-                            d.error = d.save().err();
-                            saved = true;
-                            // A rename keeps the script's model and favourite stars.
-                            if let (Some(old), Some(new)) = (old, d.path.as_deref().and_then(script_key)) {
-                                if old != new {
-                                    if let Some(m) = models.remove(&old) {
-                                        models.insert(new.clone(), m);
-                                    }
-                                    if let Some(ps) = scopes.remove(&old) {
-                                        scopes.insert(new.clone(), ps);
-                                    }
-                                    renamed.push((old, new));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let del = if d.confirm_delete { egui::Button::new(RichText::new("Delete file?").color(Color32::WHITE)).fill(Color32::from_rgb(150, 40, 40)) } else { egui::Button::new("Delete") };
+                            if ui.add(del).clicked() {
+                                if d.confirm_delete || d.path.is_none() {
+                                    remove = Some(i);
+                                } else {
+                                    d.confirm_delete = true;
                                 }
                             }
-                            d.confirm_delete = false;
-                        }
+                            if d.path.is_some() && ui.button("Open in editor").clicked() {
+                                open = d.path.clone();
+                            }
+                            if d.path.is_some() && d.dirty() && ui.button("Revert").clicked() {
+                                d.name = d.saved_name.clone();
+                                d.text = d.saved_text.clone();
+                                d.error = None;
+                            }
+                            // Unsaved edits (or a new script) outline Save instead of a separate badge.
+                            let mut save_btn = egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(ACCENT);
+                            if d.dirty() {
+                                save_btn = save_btn.stroke(egui::Stroke::new(2.0, Color32::from_rgb(230, 140, 40)));
+                            }
+                            let save_resp = ui.add_enabled(d.dirty(), save_btn);
+                            let save_resp = if d.dirty() {
+                                save_resp.on_hover_text(if d.path.is_none() { "New script: not saved yet" } else { "Unsaved changes" })
+                            } else {
+                                save_resp
+                            };
+                            if save_resp.clicked() {
+                                let (old, old_model) = (d.key(), d.model_key());
+                                d.error = d.save_in(dir).err();
+                                saved = true;
+                                // A rename keeps the script's model, project limits and favourite stars.
+                                if let (Some(om), Some(nm)) = (old_model, d.model_key()) {
+                                    if om != nm {
+                                        if let Some(m) = models.remove(&om) {
+                                            models.insert(nm, m);
+                                        }
+                                    }
+                                }
+                                if let (Some(old), Some(new)) = (old, d.key()) {
+                                    if old != new {
+                                        if let Some(ps) = scopes.remove(&old) {
+                                            scopes.insert(new.clone(), ps);
+                                        }
+                                        renamed.push((old, new));
+                                    }
+                                }
+                                d.confirm_delete = false;
+                            }
+                        });
                     });
+                    // Second line: the projects it's listed in (a saved common script), the AI model
+                    // (scripts that call one) and, collapsed, the description.
+                    let key = d.key();
+                    let ai_key = d.model_key().filter(|_| uses_ai(&d.saved_text));
+                    if key.is_some() || !d.expanded {
+                        ui.horizontal(|ui| {
+                            if let Some(key) = key.as_ref().filter(|_| d.common) {
+                                project_picker(ui, i, projects, scopes, key);
+                            }
+                            if let Some(key) = &ai_key {
+                                model_picker(ui, i, &catalog, models, key);
+                            }
+                            if !d.expanded {
+                                let desc = first_comment(&d.text).unwrap_or_else(|| format!("{} lines", d.text.lines().count()));
+                                ui.add(egui::Label::new(RichText::new(desc).size(12.5).color(TEXT_DIM)).truncate());
+                            }
+                        });
+                    }
+                    if d.expanded {
+                        // Fixed height from the line count (up to 360): inside the page's scroll area a
+                        // ScrollArea would otherwise shrink to whatever is left of the visible window.
+                        let row = ui.text_style_height(&egui::TextStyle::Monospace);
+                        let h = ((d.text.lines().count().max(4) + 1) as f32 * row + 8.0).min(360.0);
+                        egui::ScrollArea::vertical().id_salt(("script_text", i)).min_scrolled_height(h).max_height(h).show_hinted(ui, |ui| {
+                            ui.add(egui::TextEdit::multiline(&mut d.text).code_editor().desired_rows(4).desired_width(f32::INFINITY));
+                        });
+                    }
+                    if let Some(e) = &d.error {
+                        ui.label(RichText::new(e).color(RED));
+                    }
                 });
-                // Second line: the projects it's listed in (once saved), the AI model (scripts that
-                // call one) and, collapsed, the description.
-                let key = d.path.as_deref().and_then(script_key);
-                let ai_key = key.clone().filter(|_| uses_ai(&d.saved_text));
-                if key.is_some() || !d.expanded {
-                    ui.horizontal(|ui| {
-                        if let Some(key) = &key {
-                            project_picker(ui, i, projects, scopes, key);
-                        }
-                        if let Some(key) = &ai_key {
-                            model_picker(ui, i, &catalog, models, key);
-                        }
-                        if !d.expanded {
-                            let desc = first_comment(&d.text).unwrap_or_else(|| format!("{} lines", d.text.lines().count()));
-                            ui.add(egui::Label::new(RichText::new(desc).size(12.5).color(TEXT_DIM)).truncate());
-                        }
-                    });
+                ui.add_space(6.0);
+            }
+            if !any {
+                ui.label(RichText::new("None yet.").size(12.5).color(TEXT_FAINT));
+                ui.add_space(4.0);
+            }
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("+ Add script").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                    add = Some(common);
                 }
-                if d.expanded {
-                    // Fixed height from the line count (up to 360): inside the page's scroll area a
-                    // ScrollArea would otherwise shrink to whatever is left of the visible window.
-                    let row = ui.text_style_height(&egui::TextStyle::Monospace);
-                    let h = ((d.text.lines().count().max(4) + 1) as f32 * row + 8.0).min(360.0);
-                    egui::ScrollArea::vertical().id_salt(("script_text", i)).min_scrolled_height(h).max_height(h).show_hinted(ui, |ui| {
-                        ui.add(egui::TextEdit::multiline(&mut d.text).code_editor().desired_rows(4).desired_width(f32::INFINITY));
-                    });
-                }
-                if let Some(e) = &d.error {
-                    ui.label(RichText::new(e).color(RED));
-                }
+                egui::ComboBox::from_id_salt(("script_new_ext", common)).selected_text(format!(".{}", self.script_new_ext)).width(70.0).show_ui(ui, |ui| {
+                    for k in KINDS {
+                        ui.selectable_value(&mut self.script_new_ext, k.to_string(), format!(".{k}"));
+                    }
+                });
             });
-            ui.add_space(6.0);
         }
         for (old, new) in &renamed {
             self.rename_fav(super::favorites::FavList::Scripts, old, new);
         }
         if let Some(i) = remove {
             let d = self.script_drafts.remove(i);
-            if let Some(key) = d.path.as_deref().and_then(script_key) {
+            if let Some(key) = d.model_key() {
                 self.s.script_models.remove(&key);
+            }
+            if let Some(key) = d.key() {
                 self.s.script_projects.remove(&key);
                 self.forget_fav(super::favorites::FavList::Scripts, &key);
             }
@@ -1185,28 +1364,28 @@ impl App {
             }
             saved = true;
         }
-        // The palette and Favourites panel run from this list: keep it in step with the folder.
+        if common_on != self.common_scripts_on(&cur) {
+            self.set_common_scripts(&cur, common_on);
+        }
+        // The palette and Favourites panel run from this list: keep it in step with the folders.
         if saved {
-            self.scripts = scan();
+            self.refresh_scripts();
         }
         if let Some(p) = open {
             if let Err(e) = crate::links::open_file(&p, None, None, &self.s.editor, &self.s.editor_custom) {
                 self.toast(format!("Couldn't open the editor: {e}"), RED, ui.ctx());
             }
         }
-        ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("+ Add script").color(Color32::WHITE)).fill(ACCENT)).clicked() {
-                let taken = |n: &str| self.script_drafts.iter().any(|d| d.name.eq_ignore_ascii_case(n));
-                let name = (1..).map(|k| if k == 1 { "New script".to_string() } else { format!("New script {k}") }).find(|n| !taken(n)).unwrap();
-                let ext = self.script_new_ext.clone();
-                self.script_drafts.push(ScriptDraft { path: None, saved_name: String::new(), saved_text: String::new(), text: template(&ext), name, ext, confirm_delete: false, error: None, expanded: true });
-            }
-            egui::ComboBox::from_id_salt("script_new_ext").selected_text(format!(".{}", self.script_new_ext)).width(70.0).show_ui(ui, |ui| {
-                for k in KINDS {
-                    ui.selectable_value(&mut self.script_new_ext, k.to_string(), format!(".{k}"));
-                }
-            });
-        });
+        if let Some(dir) = open_dir {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+        }
+        if let Some(common) = add {
+            let taken = |n: &str| self.script_drafts.iter().any(|d| d.common == common && d.name.eq_ignore_ascii_case(n));
+            let name = (1..).map(|k| if k == 1 { "New script".to_string() } else { format!("New script {k}") }).find(|n| !taken(n)).unwrap();
+            let ext = self.script_new_ext.clone();
+            self.script_drafts.push(ScriptDraft { path: None, saved_name: String::new(), saved_text: String::new(), text: template(&ext), name, ext, confirm_delete: false, error: None, expanded: true, common });
+        }
     }
 }
 
@@ -1218,7 +1397,7 @@ mod tests {
     fn save_rename_and_conflicts() {
         let dir = std::env::temp_dir().join(format!("ai_terminal_scripts_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let new = |name: &str, ext: &str, text: &str| ScriptDraft { path: None, name: name.into(), ext: ext.into(), text: text.into(), saved_name: String::new(), saved_text: String::new(), confirm_delete: false, error: None, expanded: false };
+        let new = |name: &str, ext: &str, text: &str| ScriptDraft { path: None, name: name.into(), ext: ext.into(), text: text.into(), saved_name: String::new(), saved_text: String::new(), confirm_delete: false, error: None, expanded: false, common: false };
         let mut a = new("One", "cmd", "@echo off\necho 1\n");
         a.save_in(&dir).unwrap();
         assert!(!a.dirty());
@@ -1235,6 +1414,15 @@ mod tests {
         let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, vec!["two.cmd".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn script_keys() {
+        let p = std::path::Path::new(r"X:\Proj\scripts\Push It.cmd");
+        assert_eq!(super::key_for(p, false), "push it.cmd");
+        assert_eq!(super::key_for(p, true), "common/push it.cmd");
+        assert_eq!(super::model_key_for(p, false), r"x:\proj|push it.cmd");
+        assert_eq!(super::model_key_for(p, true), "common/push it.cmd");
     }
 
     #[test]
@@ -1257,7 +1445,7 @@ if ($null -eq $a) { exit 3 }
 Write-Host \"hi $a\"
 exit 0
 ").unwrap();
-        let sc = super::Script { name: "Ask".into(), path, desc: String::new(), ai: false };
+        let sc = super::Script { name: "Ask".into(), path, desc: String::new(), ai: false, common: false };
         let (program, args) = super::script_command(&sc, "powershell.exe".into());
         let mut r = super::ScriptRun::start(&egui::Context::default(), sc.name.clone(), program, args, dir.clone(), None, Vec::new()).unwrap();
         r.input = "Bob".into();
