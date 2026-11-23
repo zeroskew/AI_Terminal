@@ -605,10 +605,18 @@ impl App {
                     if ui.button("Edit scripts…").clicked() {
                         edit = true;
                     }
-                    ui.checkbox(&mut common_on, "Common").on_hover_text(format!("List the common scripts (shared by every project) in {project}: {}", common_dir().display()));
                 });
             });
-            let te = ui.add(egui::TextEdit::singleline(&mut self.script_filter).hint_text("Filter").desired_width(f32::INFINITY));
+            // The filter, with the common-scripts switch at its right end.
+            let te = ui
+                .horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.checkbox(&mut common_on, "Common scripts").on_hover_text(format!("List the common scripts (shared by every project) in {project}: {}", common_dir().display()));
+                        ui.add(egui::TextEdit::singleline(&mut self.script_filter).hint_text("Filter").desired_width(ui.available_width()))
+                    })
+                    .inner
+                })
+                .inner;
             if std::mem::take(&mut self.script_focus) {
                 te.request_focus();
             }
