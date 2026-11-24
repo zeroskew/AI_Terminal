@@ -1218,9 +1218,13 @@ impl App {
         let mut saved = false;
         let mut renamed: Vec<(String, String)> = Vec::new();
         let catalog = self.catalog.lock().unwrap().clone().unwrap_or_default();
+        // Favourite stars are per project; toggled after the loop (the drafts are borrowed in it).
+        let favs: std::collections::HashSet<String> = self.script_drafts.iter().filter_map(|d| d.key()).filter(|k| self.is_fav(super::favorites::FavList::Scripts, k)).collect();
         let models = &mut self.s.script_models;
         let scopes = &mut self.s.script_projects;
         let projects = &self.s.projects;
+        let has_project = !projects.is_empty();
+        let mut star: Option<String> = None;
         for common in [false, true] {
             let dir = if common { &cdir } else { &pdir };
             ui.add_space(14.0);
@@ -1252,6 +1256,12 @@ impl App {
                         let label = if d.expanded { "Hide script" } else { "Show script" };
                         if ui.button(label).clicked() {
                             d.expanded = !d.expanded;
+                        }
+                        if let Some(key) = d.key().filter(|_| has_project) {
+                            let mut on = favs.contains(&key);
+                            if ui.checkbox(&mut on, format!("Favourite in {project}")).on_hover_text("List it in this project's Favourites at the bottom of the sidebar (each project has its own)").changed() {
+                                star = Some(key);
+                            }
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let del = if d.confirm_delete { egui::Button::new(RichText::new("Delete file?").color(Color32::WHITE)).fill(Color32::from_rgb(150, 40, 40)) } else { egui::Button::new("Delete") };
@@ -1355,6 +1365,9 @@ impl App {
         }
         for (old, new) in &renamed {
             self.rename_fav(super::favorites::FavList::Scripts, old, new);
+        }
+        if let Some(key) = star {
+            self.toggle_fav(super::favorites::FavList::Scripts, &key);
         }
         if let Some(i) = remove {
             let d = self.script_drafts.remove(i);
