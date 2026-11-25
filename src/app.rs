@@ -1579,10 +1579,12 @@ impl App {
             self.last_badge = Some(want);
         }
 
-        // Taskbar progress: an indeterminate (marquee) bar while any session is working.
-        let working = self.s.taskbar_progress && self.tabs.iter().any(|t| t.sess.busy && t.sess.exited.is_none());
+        // Taskbar progress: an indeterminate (marquee) bar while any session or script is working.
+        let scripts = self.running_script_names();
+        let working = self.s.taskbar_progress && (!scripts.is_empty() || self.tabs.iter().any(|t| t.sess.busy && t.sess.exited.is_none()));
         if self.last_progress != Some(working) {
-            let who: Vec<String> = self.tabs.iter().filter(|t| t.sess.busy && t.sess.exited.is_none()).map(|t| format!("#{} {}", t.sess.id, t.sess.display_name())).collect();
+            let mut who: Vec<String> = self.tabs.iter().filter(|t| t.sess.busy && t.sess.exited.is_none()).map(|t| format!("#{} {}", t.sess.id, t.sess.display_name())).collect();
+            who.extend(scripts.iter().map(|n| format!("script {n}")));
             crate::dlog!("taskbar progress: {working} (busy: {})", who.join(", "));
             winsys::set_progress_busy(working);
             self.last_progress = Some(working);

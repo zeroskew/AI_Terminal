@@ -265,6 +265,11 @@ impl App {
         self.script_runs.iter().any(|r| r.agent == Some(kind) && r.exit.is_none())
     }
 
+    /// Names of the scripts still running (for the taskbar progress).
+    pub(super) fn running_script_names(&self) -> Vec<String> {
+        self.script_runs.iter().filter(|r| r.exit.is_none()).map(|r| r.name.clone()).collect()
+    }
+
     /// The panels of running and finished scripts, stacked up from the bottom right.
     pub(super) fn script_runs_ui(&mut self, ctx: &egui::Context) {
         // Ids of panels to close, and the run to start again.

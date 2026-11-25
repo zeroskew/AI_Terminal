@@ -580,7 +580,7 @@ impl App {
         });
         ui.add_space(8.0);
         Self::opt_check(ui, &mut self.s.flash_taskbar, "Flash the taskbar when a session needs attention", "Flash the taskbar button a few times when a session needs attention and the window isn't focused.");
-        Self::opt_check(ui, &mut self.s.taskbar_progress, "Show progress on the taskbar while working", "Show an animated progress bar on the taskbar button while any session is working.");
+        Self::opt_check(ui, &mut self.s.taskbar_progress, "Show progress on the taskbar while working", "Show an animated progress bar on the taskbar button while any session or script is working.");
         Self::opt_check(ui, &mut self.s.badge_count, "Show attention count on the taskbar badge", "Show the number of sessions needing attention on the taskbar badge instead of a single mark.");
         for (label, value, default) in [("Badge color", 0usize, [0xe5u8, 0x14, 0x14]), ("Badge text color", 1, [0xff, 0xff, 0xff])] {
             ui.horizontal(|ui| {
